@@ -10,9 +10,9 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 
 use crate::agent::dashboard::{DashboardOptions, DashboardPr, DashboardReport, dashboard};
 use crate::agent::dispatch::{DispatchOptions, attach_run, cancel_run, dispatch};
@@ -220,7 +220,7 @@ impl DashboardTerminal {
                     .constraints([
                         Constraint::Length(3),
                         Constraint::Min(5),
-                        Constraint::Length(3),
+                        Constraint::Length(5),
                     ])
                     .split(frame.area());
                 let header = Paragraph::new(format!(
@@ -235,26 +235,51 @@ impl DashboardTerminal {
                 let rows = report
                     .pull_requests
                     .iter()
-                    .map(|pr| ListItem::new(Line::from(row_spans(pr))))
+                    .map(dashboard_row)
                     .collect::<Vec<_>>();
-                let mut state = ListState::default();
+                let mut state = TableState::default();
                 if !rows.is_empty() {
                     state.select(Some(selected));
                 }
-                let list = List::new(rows)
+                let table = Table::new(
+                    rows,
+                    [
+                        Constraint::Length(22),
+                        Constraint::Length(10),
+                        Constraint::Length(8),
+                        Constraint::Length(12),
+                        Constraint::Length(18),
+                        Constraint::Length(32),
+                        Constraint::Min(24),
+                    ],
+                )
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
                             .title("Pull Requests"),
                     )
-                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+                    .header(
+                        Row::new([
+                            Cell::from("PR"),
+                            Cell::from("State"),
+                            Cell::from("Feedback"),
+                            Cell::from("Checks"),
+                            Cell::from("Agent"),
+                            Cell::from("Branch"),
+                            Cell::from("Title"),
+                        ])
+                        .style(Style::default().add_modifier(Modifier::BOLD)),
+                    )
+                    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                     .highlight_symbol("> ");
-                frame.render_stateful_widget(list, chunks[1], &mut state);
+                frame.render_stateful_widget(table, chunks[1], &mut state);
 
-                let footer = Paragraph::new(vec![
+                let footer_lines = vec![
                     Line::from("j/k move · enter/o review · v browser · d dispatch · a attach · c cancel · r refresh · q quit"),
+                    Line::from(selected_pr_detail(report.pull_requests.get(selected))),
                     Line::from(status_message.to_string()),
-                ])
+                ];
+                let footer = Paragraph::new(footer_lines)
                 .block(Block::default().borders(Borders::ALL));
                 frame.render_widget(footer, chunks[2]);
             })
@@ -284,51 +309,137 @@ impl Drop for DashboardTerminal {
     }
 }
 
-fn row_spans(pr: &DashboardPr) -> Vec<Span<'static>> {
-    vec![Span::raw(format_dashboard_row(pr))]
+fn dashboard_row(pr: &DashboardPr) -> Row<'static> {
+    Row::new([
+        Cell::from(pr_label(pr)),
+        Cell::from(state_cell(pr)),
+        Cell::from(feedback_cell(pr)),
+        Cell::from(checks_cell(pr)),
+        Cell::from(run_cell(pr)),
+        Cell::from(branch_cell(pr)),
+        Cell::from(one_line(&pr.title)),
+    ])
 }
 
-fn format_dashboard_row(pr: &DashboardPr) -> String {
+fn selected_pr_detail(pr: Option<&DashboardPr>) -> String {
+    let Some(pr) = pr else {
+        return "No PR selected".to_string();
+    };
+    let error = pr
+        .error
+        .as_ref()
+        .map(|error| format!(" · error: {}", one_line(error)))
+        .unwrap_or_default();
+    format!(
+        "{}#{} · {} -> {} · head {} · {}{}",
+        pr.repository,
+        pr.number,
+        empty_label(&pr.head_ref_name),
+        empty_label(&pr.base_ref_name),
+        short_sha(&pr.head_sha),
+        pr.url,
+        error
+    )
+}
+
+fn pr_label(pr: &DashboardPr) -> String {
+    let repo = pr.repository.rsplit('/').next().unwrap_or(&pr.repository);
+    format!("{repo}#{}", pr.number)
+}
+
+fn state_cell(pr: &DashboardPr) -> Line<'static> {
+    Line::from(Span::styled(
+        state_text(pr),
+        Style::default().fg(Color::Cyan),
+    ))
+}
+
+fn state_text(pr: &DashboardPr) -> String {
     let draft = if pr.is_draft { " draft" } else { "" };
-    let feedback = pr
-        .feedback_count
+    format!("{}{}", pr.state.to_ascii_lowercase(), draft)
+}
+
+fn feedback_cell(pr: &DashboardPr) -> Line<'static> {
+    let feedback = feedback_text(pr);
+    let style = match pr.feedback_count {
+        Some(0) => Style::default().fg(Color::DarkGray),
+        Some(_) => Style::default().fg(Color::Yellow),
+        None => Style::default().fg(Color::DarkGray),
+    };
+    Line::from(Span::styled(feedback, style))
+}
+
+fn checks_cell(pr: &DashboardPr) -> Line<'static> {
+    let checks = pr.check_state.map(state_label).unwrap_or("unknown");
+    let style = match checks {
+        "passing" => Style::default().fg(Color::Green),
+        "failing" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        "pending" => Style::default().fg(Color::Yellow),
+        _ => Style::default().fg(Color::DarkGray),
+    };
+    Line::from(Span::styled(checks_text(pr), style))
+}
+
+fn feedback_text(pr: &DashboardPr) -> String {
+    pr.feedback_count
         .map(|count| count.to_string())
-        .unwrap_or_else(|| "?".to_string());
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn checks_text(pr: &DashboardPr) -> String {
     let checks = pr.check_state.map(state_label).unwrap_or("unknown");
     let failing = pr
         .failing_check_count
         .map(|count| count.to_string())
         .unwrap_or_else(|| "?".to_string());
-    let run = pr
-        .latest_run
+    if failing == "0" {
+        checks.to_string()
+    } else {
+        format!("{checks} ({failing})")
+    }
+}
+
+fn run_cell(pr: &DashboardPr) -> String {
+    pr.latest_run
         .as_ref()
         .map(|run| {
             format!(
-                " run={}({})",
+                "{} {}",
                 run.run_id.chars().take(8).collect::<String>(),
                 dispatch_status_label(run.status)
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn branch_cell(pr: &DashboardPr) -> String {
+    truncate_middle(
+        &format!(
+            "{} -> {}",
+            empty_label(&pr.head_ref_name),
+            empty_label(&pr.base_ref_name)
+        ),
+        32,
+    )
+}
+
+#[cfg(test)]
+fn format_dashboard_row(pr: &DashboardPr) -> String {
     let error = pr
         .error
         .as_ref()
         .map(|error| format!(" error={}", one_line(error)))
         .unwrap_or_default();
     format!(
-        "{}#{}{} {}->{} head={} feedback={} checks={} failing={}{}{} {}",
-        pr.repository,
-        pr.number,
-        draft,
-        empty_label(&pr.head_ref_name),
-        empty_label(&pr.base_ref_name),
-        short_sha(&pr.head_sha),
-        feedback,
-        checks,
-        failing,
-        run,
+        "{} | {} | {} | feedback {} | checks {} | run {}{} | {}",
+        pr_label(pr),
+        state_text(pr),
+        branch_cell(pr),
+        feedback_text(pr),
+        checks_text(pr),
+        run_cell(pr),
         error,
-        one_line(&pr.title)
+        one_line(&pr.title),
     )
 }
 
@@ -342,6 +453,28 @@ fn short_sha(value: &str) -> &str {
 
 fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let left_len = (max_chars - 1) / 2;
+    let right_len = max_chars - 1 - left_len;
+    let left = chars.iter().take(left_len).collect::<String>();
+    let right = chars
+        .iter()
+        .rev()
+        .take(right_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{left}…{right}")
 }
 
 #[cfg(test)]
@@ -379,12 +512,12 @@ mod tests {
             }),
             error: None,
         });
-        assert!(row.contains("squareup/java#480718 draft"));
-        assert!(row.contains("feature/operators->main"));
-        assert!(row.contains("head=abcdef123456"));
-        assert!(row.contains("feedback=2"));
-        assert!(row.contains("checks=failing"));
-        assert!(row.contains("run=12345678(started)"));
+        assert!(row.contains("java#480718"));
+        assert!(row.contains("open draft"));
+        assert!(row.contains("feature/operators -> main"));
+        assert!(row.contains("feedback 2"));
+        assert!(row.contains("checks failing (1)"));
+        assert!(row.contains("run 12345678 started"));
     }
 
     #[test]
