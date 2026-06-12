@@ -2023,6 +2023,11 @@ impl App {
     /// reopening starts clean, then quit. Reviewed markers are persisted
     /// eagerly, so the on-disk file is removed too.
     pub fn discard_session_and_quit(&mut self) {
+        self.discard_session_state();
+        self.should_quit = true;
+    }
+
+    pub fn discard_session_state(&mut self) {
         let path = self
             .session_path
             .clone()
@@ -2035,7 +2040,6 @@ impl App {
             }
         }
         self.dirty = false;
-        self.should_quit = true;
     }
 
     pub fn save_current_session_merging_external(&mut self) -> Result<PathBuf> {
@@ -5770,11 +5774,12 @@ impl App {
             }
             let path = file.display_path();
             let is_reviewed = self.session.is_file_reviewed(path);
+            let has_remote_threads = self.file_has_visible_remote_threads(path);
 
             if !single {
                 cumulative += 1; // File header
             }
-            if !single && is_reviewed {
+            if !single && is_reviewed && !has_remote_threads {
                 // multi-file collapsed: no body, no trailing spacing
                 continue;
             }
@@ -5790,7 +5795,9 @@ impl App {
                 for (hunk_idx, hunk) in file.hunks.iter().enumerate() {
                     positions.push(cumulative);
                     cumulative += 1;
-                    if !self.is_hunk_reviewed(file_idx, hunk_idx) {
+                    if !self.is_hunk_reviewed(file_idx, hunk_idx)
+                        || self.hunk_has_visible_remote_threads(file, hunk)
+                    {
                         cumulative += hunk.lines.len();
                     }
                 }
@@ -5912,10 +5919,49 @@ impl App {
     }
 
     fn file_render_height(&self, file_idx: usize, file: &DiffFile) -> usize {
-        if self.session.is_file_reviewed(file.display_path()) {
+        let path = file.display_path();
+        if self.session.is_file_reviewed(path) && !self.file_has_visible_remote_threads(path) {
             return 1; // collapsed: header only
         }
         1 + self.file_render_body_height(file_idx, file) // header + body
+    }
+
+    pub(crate) fn file_has_visible_remote_threads(&self, path: &std::path::Path) -> bool {
+        let path = path.to_string_lossy();
+        self.forge_review_threads.iter().any(|thread| {
+            thread.path == *path
+                && self
+                    .session
+                    .remote_comments_visibility
+                    .render_decision(thread)
+                    .is_some()
+        })
+    }
+
+    pub(crate) fn hunk_has_visible_remote_threads(&self, file: &DiffFile, hunk: &DiffHunk) -> bool {
+        let path = file.display_path().to_string_lossy();
+        self.forge_review_threads.iter().any(|thread| {
+            if thread.path != *path
+                || self
+                    .session
+                    .remote_comments_visibility
+                    .render_decision(thread)
+                    .is_none()
+            {
+                return false;
+            }
+            let Some(line) = thread.line else {
+                return false;
+            };
+            match thread.side {
+                crate::forge::remote_comments::RemoteCommentSide::Right => {
+                    line >= hunk.new_start && line < hunk.new_start + hunk.new_count
+                }
+                crate::forge::remote_comments::RemoteCommentSide::Left => {
+                    line >= hunk.old_start && line < hunk.old_start + hunk.old_count
+                }
+            }
+        })
     }
 
     /// File body height in lines (comments + content + trailing spacing),
@@ -5992,7 +6038,9 @@ impl App {
 
                 // Hunk header + diff lines
                 content_lines += 1; // Hunk header
-                if self.is_hunk_reviewed(file_idx, hunk_idx) {
+                if self.is_hunk_reviewed(file_idx, hunk_idx)
+                    && !self.hunk_has_visible_remote_threads(file, hunk)
+                {
                     continue;
                 }
 
@@ -9234,7 +9282,10 @@ impl App {
             // If reviewed, skip all content for this file. Single-file
             // view ignores the reviewed-collapse since the user
             // explicitly focused this file.
-            if self.session.is_file_reviewed(path) && !self.is_single_file_view {
+            if self.session.is_file_reviewed(path)
+                && !self.is_single_file_view
+                && !self.file_has_visible_remote_threads(path)
+            {
                 continue;
             }
 
@@ -9347,7 +9398,9 @@ impl App {
                     // Hunk header
                     self.line_annotations
                         .push(AnnotatedLine::HunkHeader { file_idx, hunk_idx });
-                    if self.is_hunk_reviewed(file_idx, hunk_idx) {
+                    if self.is_hunk_reviewed(file_idx, hunk_idx)
+                        && !self.hunk_has_visible_remote_threads(file, hunk)
+                    {
                         continue;
                     }
 
@@ -10321,7 +10374,7 @@ mod commit_selection_tests {
 mod target_selector_tests {
     use super::*;
     use crate::forge::selector::PullRequestsTab;
-    use crate::forge::traits::PullRequestSummary;
+    use crate::forge::traits::{PrSessionKey, PullRequestSummary};
     use crate::model::FileStatus;
     use crate::vcs::traits::{VcsChangeStatus, VcsType};
 
@@ -11200,6 +11253,36 @@ index 1111111..2222222 100644
         // then
         assert_eq!(app.target_tab, TargetTab::PullRequests);
         assert_eq!(app.input_mode, InputMode::CommitSelect);
+        // Cancel the background fetch handle to avoid surprising real `gh` calls.
+        app.pr_load_rx = None;
+    }
+
+    #[test]
+    fn q_in_pr_review_returns_to_pr_selector() {
+        // given
+        let mut app = build_app_with_commits(vec![dummy_commit("abc")]);
+        let repo = ForgeRepository::github("github.com", "agavra", "tuicr");
+        app.forge_repository = Some(repo.clone());
+        app.pr_tab = PullRequestsTab::new(app.forge_repository.clone());
+        app.diff_source = DiffSource::PullRequest(Box::new(PullRequestDiffSource {
+            key: PrSessionKey::new(repo, 125, "headsha".to_string()),
+            base_sha: "basesha".to_string(),
+            title: "test pr".to_string(),
+            url: "https://github.com/agavra/tuicr/pull/125".to_string(),
+            head_ref_name: "feat".to_string(),
+            base_ref_name: "main".to_string(),
+            state: "OPEN".to_string(),
+            closed: false,
+            merged: false,
+        }));
+
+        // when
+        crate::handler::handle_diff_action(&mut app, crate::input::Action::Quit);
+
+        // then
+        assert!(!app.should_quit);
+        assert_eq!(app.input_mode, InputMode::CommitSelect);
+        assert_eq!(app.target_tab, TargetTab::PullRequests);
         // Cancel the background fetch handle to avoid surprising real `gh` calls.
         app.pr_load_rx = None;
     }
@@ -13886,6 +13969,50 @@ mod expand_gap_tests {
         app.rebuild_annotations();
 
         assert_eq!(app.total_lines(), app.line_annotations.len());
+    }
+
+    #[test]
+    fn reviewed_file_with_visible_remote_thread_stays_expanded() {
+        use crate::forge::remote_comments::{
+            RemoteCommentSide, RemoteReviewComment, RemoteReviewThread,
+        };
+
+        let files = vec![make_file_with_hunks("b.rs", vec![make_hunk(1, 1)])];
+        let mut app = build_app_with_files(files, 1);
+        app.sync_viewport_width(80);
+        app.session
+            .get_file_mut(&PathBuf::from("b.rs"))
+            .unwrap()
+            .reviewed = true;
+        app.forge_review_threads = vec![RemoteReviewThread {
+            id: "T1".into(),
+            path: "b.rs".into(),
+            line: Some(1),
+            current_line: Some(1),
+            original_line: Some(1),
+            side: RemoteCommentSide::Right,
+            is_resolved: false,
+            is_outdated: false,
+            comments: vec![RemoteReviewComment {
+                id: "C1".into(),
+                author: Some("alice".into()),
+                body: "remote feedback".into(),
+                created_at: None,
+                diff_hunk: None,
+                in_reply_to: None,
+                url: "https://example.com/c1".into(),
+            }],
+        }];
+
+        app.rebuild_annotations();
+
+        assert!(
+            app.line_annotations
+                .iter()
+                .any(|line| matches!(line, AnnotatedLine::RemoteThreadLine { .. })),
+            "reviewed file should still expose visible remote GitHub comments"
+        );
+        assert!(app.total_lines() > 1, "reviewed file should not collapse");
     }
 
     #[test]

@@ -275,6 +275,7 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
         let path = file.display_path();
         let status = file.status.as_char();
         let is_reviewed = app.session.is_file_reviewed(path);
+        let has_remote_threads = app.file_has_visible_remote_threads(path);
 
         if !app.is_single_file_view {
             let indicator = cursor_indicator_spaced(line_idx, ctx.current_line_idx);
@@ -298,7 +299,7 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
         // If file is reviewed (and we're in multi-file view), skip the
         // body. Single-file view keeps the focused file visible under a
         // dimmed banner.
-        if is_reviewed && !app.is_single_file_view {
+        if is_reviewed && !app.is_single_file_view && !has_remote_threads {
             continue;
         }
         if is_reviewed && app.is_single_file_view {
@@ -569,7 +570,7 @@ pub(super) fn render_side_by_side_diff(frame: &mut Frame, app: &mut App, area: R
                     Span::styled(hunk_header_text, hunk_header_style),
                 ]));
                 line_idx += 1;
-                if is_hunk_reviewed {
+                if is_hunk_reviewed && !app.hunk_has_visible_remote_threads(file, hunk) {
                     continue;
                 }
 

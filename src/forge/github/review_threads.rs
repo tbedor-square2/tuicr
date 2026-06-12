@@ -205,18 +205,17 @@ fn convert_thread(raw: GhReviewThread) -> RemoteReviewThread {
         .map(RemoteCommentSide::parse)
         .unwrap_or(RemoteCommentSide::Right);
 
-    // If `line` is null on an outdated thread, fall back to `originalLine`
-    // so we still know roughly where the thread was anchored. The
-    // `is_outdated` flag drives muted styling + suppression from the
-    // default `:comments unresolved` view.
     let current_line = raw.line;
     let original_line = raw.original_line;
-    let line = current_line.or(original_line);
 
     RemoteReviewThread {
         id: raw.id,
         path: raw.path.unwrap_or_default(),
-        line,
+        // `line` means "currently renderable inline anchor". If GitHub
+        // returns null, keep the thread visible in the review-level section
+        // instead of trying to match a stale `originalLine` against the
+        // current diff and silently dropping it.
+        line: current_line,
         current_line,
         original_line,
         side,
@@ -541,15 +540,16 @@ mod tests {
     }
 
     #[test]
-    fn should_parse_outdated_thread_flag_and_fall_back_to_original_line() {
+    fn should_parse_outdated_thread_with_null_current_line_as_unanchored() {
         // given/when
         let parsed = parse_graphql_page(OUTDATED_THREAD_JSON).unwrap();
         // then
         let thread = &parsed.threads[0];
         assert!(thread.is_outdated);
-        // line is null but originalLine = 19 — we surface originalLine so
-        // the renderer can still place the comment at its last known anchor.
-        assert_eq!(thread.line, Some(19));
+        // line is null but originalLine = 19. Keep originalLine for metadata
+        // and agent prompts, but do not treat it as a current render anchor.
+        assert_eq!(thread.line, None);
+        assert_eq!(thread.original_line, Some(19));
         assert_eq!(thread.side, RemoteCommentSide::Left);
     }
 

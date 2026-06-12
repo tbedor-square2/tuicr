@@ -129,11 +129,12 @@ pub struct RemoteReviewThread {
 }
 
 impl RemoteReviewThread {
-    /// Per the spec, the default `:comments unresolved` view shows only
-    /// threads that are neither resolved nor outdated. `:comments all`
-    /// shows everything, and `:comments hide` shows nothing.
+    /// Per the agent workflow, the default `:comments unresolved` view shows
+    /// unresolved threads even when GitHub marks their anchors outdated. Those
+    /// outdated threads render muted but remain visible because they may still
+    /// need a relevance check.
     pub fn is_active(&self) -> bool {
-        !self.is_resolved && !self.is_outdated
+        !self.is_resolved
     }
 
     /// The first comment is the thread root for display purposes.
@@ -173,13 +174,13 @@ impl PrCommentsVisibility {
         match self {
             PrCommentsVisibility::Hide => None,
             PrCommentsVisibility::Unresolved => {
-                if thread.is_active() {
-                    Some(false)
-                } else {
+                if thread.is_resolved {
                     None
+                } else {
+                    Some(thread.is_outdated)
                 }
             }
-            PrCommentsVisibility::All => Some(!thread.is_active()),
+            PrCommentsVisibility::All => Some(thread.is_resolved || thread.is_outdated),
         }
     }
 
@@ -293,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn should_show_only_active_threads_when_unresolved() {
+    fn should_show_unresolved_threads_including_outdated_when_unresolved() {
         // given
         let v = PrCommentsVisibility::Unresolved;
         let active = make_thread("a", "src/lib.rs", Some(10), false, false);
@@ -302,7 +303,7 @@ mod tests {
         // when/then
         assert_eq!(v.render_decision(&active), Some(false));
         assert_eq!(v.render_decision(&resolved), None);
-        assert_eq!(v.render_decision(&outdated), None);
+        assert_eq!(v.render_decision(&outdated), Some(true));
     }
 
     #[test]

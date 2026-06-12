@@ -1663,10 +1663,12 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
                 app.quit_warned = true;
             } else if app.dirty && !app.session.has_comments() {
                 // Dirty from reviewed-file markers only: discard the state and
-                // quit instead of warning about unsaved changes.
-                app.discard_session_and_quit();
+                // return to the PR selector instead of warning about unsaved
+                // changes.
+                app.discard_session_state();
+                return_to_pr_selector_or_quit(app);
             } else {
-                app.should_quit = true;
+                return_to_pr_selector_or_quit(app);
             }
         }
         Action::ExitMode => {
@@ -1782,6 +1784,18 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
             }
         }
         _ => {}
+    }
+}
+
+fn return_to_pr_selector_or_quit(app: &mut App) {
+    if matches!(app.diff_source, app::DiffSource::PullRequest(_)) && app.forge_repository.is_some()
+    {
+        match app.enter_target_selector(TargetTab::PullRequests) {
+            Ok(()) => app.quit_warned = false,
+            Err(err) => app.set_error(format!("Failed to open PR selector: {err}")),
+        }
+    } else {
+        app.should_quit = true;
     }
 }
 

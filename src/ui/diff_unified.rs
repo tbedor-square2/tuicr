@@ -227,6 +227,7 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
         let path = file.display_path();
         let status = file.status.as_char();
         let is_reviewed = app.session.is_file_reviewed(path);
+        let has_remote_threads = app.file_has_visible_remote_threads(path);
 
         // The `═══ filename ═══` separator is redundant in single-file
         // view: the status bar and file list already name the file, and
@@ -257,7 +258,7 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
         // If file is reviewed (and we're in multi-file view), skip
         // rendering the body. In single-file view the user explicitly
         // focused this file, so show its content under a dimmed banner.
-        if is_reviewed && !app.is_single_file_view {
+        if is_reviewed && !app.is_single_file_view && !has_remote_threads {
             continue;
         }
         if is_reviewed && app.is_single_file_view {
@@ -531,7 +532,7 @@ pub(super) fn render_unified_diff(frame: &mut Frame, app: &mut App, area: Rect) 
                     Span::styled(hunk_header_text, hunk_header_style),
                 ]));
                 line_idx += 1;
-                if is_hunk_reviewed {
+                if is_hunk_reviewed && !app.hunk_has_visible_remote_threads(file, hunk) {
                     continue;
                 }
 
