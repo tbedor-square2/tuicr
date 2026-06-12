@@ -95,6 +95,11 @@ fn render_comment_row(app: &App, item: &CommentNavigatorItem) -> Line<'static> {
         ));
     }
     spans.push(Span::styled(location, dim_style));
+    if let Some(author) = item.author.as_deref() {
+        spans.push(Span::styled(format!(" · @{author}"), dim_style));
+    }
+    spans.push(Span::raw(" · "));
+    spans.push(Span::raw(item.preview.clone()));
     Line::from(spans)
 }
 

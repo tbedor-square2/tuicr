@@ -1288,10 +1288,59 @@ pub struct CommentNavigatorItem {
     pub path: Option<String>,
     pub line: Option<u32>,
     pub side: Option<LineSide>,
+    pub preview: String,
     /// Author of the underlying comment — the local commenter for local items,
     /// or the root comment's author for remote threads. `None` only when the
     /// forge did not attach an author (e.g. deleted user).
     pub author: Option<String>,
+}
+
+fn comment_preview(body: &str) -> String {
+    let preview = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if preview.is_empty() {
+        "(empty comment)".to_string()
+    } else {
+        preview
+    }
+}
+
+fn remote_thread_preview(thread: &crate::forge::remote_comments::RemoteReviewThread) -> String {
+    let mut parts = Vec::new();
+    if let Some(root) = thread.root() {
+        parts.push(comment_preview(&root.body));
+    }
+    let reply_count = thread.replies().count();
+    if reply_count > 0 {
+        let reply_preview = thread
+            .replies()
+            .next()
+            .map(|reply| {
+                let author = reply.author.as_deref().unwrap_or("unknown");
+                format!("{author}: {}", comment_preview(&reply.body))
+            })
+            .unwrap_or_default();
+        parts.push(format!("{reply_count} replies · {reply_preview}"));
+    }
+    if thread.is_resolved {
+        parts.push("resolved".to_string());
+    }
+    if thread.is_outdated {
+        parts.push("outdated".to_string());
+    }
+    if parts.is_empty() {
+        "(empty GitHub thread)".to_string()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+fn remote_summary_preview(summary: &crate::forge::remote_comments::RemoteReviewSummary) -> String {
+    let state = summary
+        .state
+        .badge_label()
+        .unwrap_or("commented")
+        .to_string();
+    format!("{state} · {}", comment_preview(&summary.body))
 }
 
 #[derive(Debug)]
@@ -5227,6 +5276,7 @@ impl App {
                     path: None,
                     line: None,
                     side: None,
+                    preview: comment_preview(&comment.content),
                     author: Some(comment.author.clone()),
                 })
             }
@@ -5247,6 +5297,7 @@ impl App {
                     path: Some(path.display().to_string()),
                     line: None,
                     side: None,
+                    preview: comment_preview(&comment.content),
                     author: Some(comment.author.clone()),
                 })
             }
@@ -5272,6 +5323,7 @@ impl App {
                     path: Some(path.display().to_string()),
                     line: Some(line),
                     side: Some(side),
+                    preview: comment_preview(&comment.content),
                     author: Some(comment.author.clone()),
                 })
             }
@@ -5293,6 +5345,7 @@ impl App {
                     path: Some(thread.path.clone()),
                     line: thread.line,
                     side: Some(side),
+                    preview: remote_thread_preview(thread),
                     author,
                 })
             }
@@ -5305,6 +5358,7 @@ impl App {
                     path: None,
                     line: None,
                     side: None,
+                    preview: remote_summary_preview(summary),
                     author: summary.author.clone(),
                 })
             }
@@ -14064,15 +14118,26 @@ mod expand_gap_tests {
             side: RemoteCommentSide::Right,
             is_resolved: false,
             is_outdated: false,
-            comments: vec![RemoteReviewComment {
-                id: "C1".into(),
-                author: Some("alice".into()),
-                body: "remote-thread".into(),
-                created_at: None,
-                diff_hunk: None,
-                in_reply_to: None,
-                url: "https://example.com/c1".into(),
-            }],
+            comments: vec![
+                RemoteReviewComment {
+                    id: "C1".into(),
+                    author: Some("alice".into()),
+                    body: "remote-thread".into(),
+                    created_at: None,
+                    diff_hunk: None,
+                    in_reply_to: None,
+                    url: "https://example.com/c1".into(),
+                },
+                RemoteReviewComment {
+                    id: "C2".into(),
+                    author: Some("bob".into()),
+                    body: "follow-up reply".into(),
+                    created_at: None,
+                    diff_hunk: None,
+                    in_reply_to: Some("C1".into()),
+                    url: "https://example.com/c2".into(),
+                },
+            ],
         }];
         app.rebuild_annotations();
 
@@ -14104,6 +14169,13 @@ mod expand_gap_tests {
             CommentNavigatorKey::Remote { thread_idx: 0 }
         ));
         assert_eq!(items[3].author.as_deref(), Some("alice"));
+        assert_eq!(items[0].preview, "review-level");
+        assert_eq!(items[1].preview, "file-level");
+        assert_eq!(items[2].preview, "line-level");
+        assert_eq!(
+            items[3].preview,
+            "remote-thread · 1 replies · bob: follow-up reply"
+        );
     }
 
     #[test]
@@ -14132,6 +14204,7 @@ mod expand_gap_tests {
             CommentNavigatorKey::RemoteReview { summary_idx: 0 }
         ));
         assert_eq!(items[0].author.as_deref(), Some("alice"));
+        assert_eq!(items[0].preview, "commented · Overall LGTM");
         assert!(items[0].path.is_none());
         assert!(items[0].line.is_none());
 

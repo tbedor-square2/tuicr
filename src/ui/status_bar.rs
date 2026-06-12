@@ -271,8 +271,13 @@ pub fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             Cow::Borrowed("")
         } else {
             match app.input_mode {
+                InputMode::Normal if matches!(app.diff_source, DiffSource::PullRequest(_)) => {
+                    Cow::Borrowed(
+                        "   j/k scroll \u{00b7} tab panels \u{00b7} a agent \u{00b7} A thread agent \u{00b7} c comment \u{00b7} ? help",
+                    )
+                }
                 InputMode::Normal => Cow::Borrowed(
-                    "   j/k scroll \u{00b7} {/} file \u{00b7} r file \u{00b7} R hunk \u{00b7} c comment \u{00b7} ? help",
+                    "   j/k scroll \u{00b7} tab panels \u{00b7} {/} file \u{00b7} r file \u{00b7} R hunk \u{00b7} c comment \u{00b7} ? help",
                 ),
                 InputMode::Command => {
                     Cow::Borrowed("   tab complete \u{00b7} \u{21b5} execute \u{00b7} esc cancel")

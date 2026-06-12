@@ -42,6 +42,8 @@ pub enum Action {
     PendingDCommand,
     SearchNext,
     SearchPrev,
+    AgentDispatchPr,
+    AgentDispatchThread,
 
     // Visual selection mode
     EnterVisualMode,
@@ -201,6 +203,8 @@ fn map_normal_mode(key: KeyEvent, leader_key: char) -> Action {
         (KeyCode::Char('y'), KeyModifiers::NONE) => Action::ExportToClipboard,
         (KeyCode::Char('n'), KeyModifiers::NONE) => Action::SearchNext,
         (KeyCode::Char('N'), _) => Action::SearchPrev,
+        (KeyCode::Char('a'), KeyModifiers::NONE) => Action::AgentDispatchPr,
+        (KeyCode::Char('A'), _) => Action::AgentDispatchThread,
 
         // Mode changes (use _ for shifted characters like : and ?)
         (KeyCode::Char(':'), _) => Action::EnterCommandMode,
@@ -458,6 +462,18 @@ mod tests {
     fn should_map_uppercase_g_to_go_to_bottom_in_normal_mode() {
         let action = map_normal_mode(key_shift('G'), DEFAULT_LEADER_KEY);
         assert_eq!(action, Action::GoToBottom);
+    }
+
+    #[test]
+    fn should_map_agent_dispatch_shortcuts_in_normal_mode() {
+        assert_eq!(
+            map_normal_mode(key(KeyCode::Char('a')), DEFAULT_LEADER_KEY),
+            Action::AgentDispatchPr
+        );
+        assert_eq!(
+            map_normal_mode(key_shift('A'), DEFAULT_LEADER_KEY),
+            Action::AgentDispatchThread
+        );
     }
 
     #[test]

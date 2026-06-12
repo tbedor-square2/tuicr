@@ -1764,6 +1764,8 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
         Action::SearchPrev => {
             app.search_prev_in_diff();
         }
+        Action::AgentDispatchPr => dispatch_agent_for_current_pr(app),
+        Action::AgentDispatchThread => dispatch_agent_for_selected_thread(app),
         Action::EnterVisualMode => {
             if app.get_line_at_cursor().is_some() {
                 app.enter_visual_mode_at_cursor();

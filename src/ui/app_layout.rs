@@ -13,8 +13,8 @@ use crate::ui::selector::render_commit_select;
 use crate::ui::{comment_panel, help_popup, status_bar, styles, submit_modals};
 
 const FILE_LIST_MIN_HEIGHT: u16 = 4;
-const COMMENT_NAVIGATOR_MIN_HEIGHT: u16 = 4;
-const COMMENT_NAVIGATOR_MAX_HEIGHT: u16 = 12;
+const COMMENT_NAVIGATOR_MIN_HEIGHT: u16 = 6;
+const COMMENT_NAVIGATOR_MAX_HEIGHT: u16 = 18;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     frame.render_widget(
@@ -101,15 +101,16 @@ fn render_main_content(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     if app.show_file_list {
+        let comment_items = app.build_comment_navigator_items();
+        let left_width = if comment_items.is_empty() { 20 } else { 35 };
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(20), // File list
-                Constraint::Percentage(80), // Diff view
+                Constraint::Percentage(left_width),       // File list + comments
+                Constraint::Percentage(100 - left_width), // Diff view
             ])
             .split(content_area);
 
-        let comment_items = app.build_comment_navigator_items();
         if !comment_items.is_empty()
             && chunks[0].height >= FILE_LIST_MIN_HEIGHT + COMMENT_NAVIGATOR_MIN_HEIGHT
         {

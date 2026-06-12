@@ -358,6 +358,13 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
             ),
             Span::raw("Jump to selected comment"),
         ]),
+        Line::from(vec![
+            Span::styled(
+                "  A         ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Dispatch agent for selected GitHub thread (PR mode)"),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
             "Review Actions",
@@ -412,6 +419,20 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw("Delete comment at cursor"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  a         ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Dispatch agent for current PR (PR mode)"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  A         ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Dispatch agent for GitHub thread at cursor (PR mode)"),
         ]),
         Line::from(vec![
             Span::styled(
@@ -652,6 +673,27 @@ pub fn render_help(frame: &mut Frame, app: &mut App) {
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw("  Hide remote comments in PR mode"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  :agent dispatch",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  Dispatch an agent for the current PR"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  :agent dispatch-thread",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  Dispatch an agent for the selected GitHub thread"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  :agent status",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  Show latest local agent run for the current PR"),
         ]),
         Line::from(vec![
             Span::styled(
