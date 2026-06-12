@@ -692,6 +692,7 @@ impl ReviewFilterArg {
 
 impl From<Cli> for CliArgs {
     fn from(cli: Cli) -> Self {
+        let bare_startup = cli.command.is_none() && !cli.tui_options.has_any_explicit_value();
         let (options, pr_target, review_command, prs_command) = match cli.command {
             Some(Subcmd::Tui(command)) => match command.command {
                 Some(TuiSubcmd::Pr(pr)) => (
@@ -710,6 +711,12 @@ impl From<Cli> for CliArgs {
             ),
             Some(Subcmd::Review { command }) => (TuiOptions::default(), None, Some(command), None),
             Some(Subcmd::Prs { command }) => (TuiOptions::default(), None, None, Some(command)),
+            None if bare_startup => (
+                cli.tui_options,
+                None,
+                None,
+                Some(default_startup_pr_dashboard_command()),
+            ),
             None => (cli.tui_options, None, None, None),
         };
         Self {
@@ -727,6 +734,22 @@ impl From<Cli> for CliArgs {
             review_command,
             prs_command,
         }
+    }
+}
+
+fn default_startup_pr_dashboard_command() -> PrsCommand {
+    PrsCommand::Dashboard {
+        owners: vec!["squareup".to_string()],
+        repositories: Vec::new(),
+        author: "@me".to_string(),
+        draft: false,
+        ready: false,
+        review: None,
+        needs_action: false,
+        limit: 50,
+        json: false,
+        tui: true,
+        allow_non_owned: false,
     }
 }
 
@@ -916,6 +939,41 @@ mod tests {
     fn should_leave_theme_none_when_not_provided() {
         let parsed = parse_for_test(&["tuicr"]).expect("parse should succeed");
         assert_eq!(parsed.theme, None);
+    }
+
+    #[test]
+    fn should_default_bare_startup_to_squareup_pr_dashboard_tui() {
+        let parsed = parse_for_test(&["tuicr"]).expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Dashboard {
+                owners: vec!["squareup".to_string()],
+                repositories: Vec::new(),
+                author: "@me".to_string(),
+                draft: false,
+                ready: false,
+                review: None,
+                needs_action: false,
+                limit: 50,
+                json: false,
+                tui: true,
+                allow_non_owned: false,
+            })
+        );
+    }
+
+    #[test]
+    fn should_keep_explicit_tui_command_as_local_tui() {
+        let parsed = parse_for_test(&["tuicr", "tui"]).expect("parse should succeed");
+        assert_eq!(parsed.prs_command, None);
+        assert_eq!(parsed.pr_target, None);
+    }
+
+    #[test]
+    fn should_keep_explicit_root_tui_options_as_local_tui() {
+        let parsed = parse_for_test(&["tuicr", "-w"]).expect("parse should succeed");
+        assert_eq!(parsed.prs_command, None);
+        assert!(parsed.working_tree);
     }
 
     #[test]
