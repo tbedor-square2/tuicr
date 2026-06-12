@@ -709,10 +709,17 @@ fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
                 app.set_error("No write since last change (add ! to override)");
             } else if app.dirty {
                 // Dirty from reviewed-file markers only: discard the state and
-                // quit instead of requiring `:q!`.
-                app.discard_session_and_quit();
+                // leave instead of requiring `:q!`.
+                app.discard_session_state();
+                return_to_pr_selector_or_quit(app);
+                if app.input_mode == InputMode::CommitSelect {
+                    return CommandAfterDispatch::KeepMode;
+                }
             } else {
-                app.should_quit = true;
+                return_to_pr_selector_or_quit(app);
+                if app.input_mode == InputMode::CommitSelect {
+                    return CommandAfterDispatch::KeepMode;
+                }
             }
             CommandAfterDispatch::ExitCommandMode
         }
@@ -1790,7 +1797,9 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
 }
 
 fn return_to_pr_selector_or_quit(app: &mut App) {
-    if matches!(app.diff_source, app::DiffSource::PullRequest(_)) && app.forge_repository.is_some()
+    if matches!(app.diff_source, app::DiffSource::PullRequest(_))
+        && app.forge_repository.is_some()
+        && app.pr_review_return_target == app::PrReviewReturnTarget::TargetSelector
     {
         match app.enter_target_selector(TargetTab::PullRequests) {
             Ok(()) => app.quit_warned = false,

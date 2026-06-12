@@ -48,8 +48,26 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                 }
                 KeyCode::Enter | KeyCode::Char('o') => {
                     if let Some(pr) = report.pull_requests.get(selected) {
+                        let repository = pr.repository.clone();
+                        let number = pr.number;
                         terminal.leave()?;
-                        return open_pr(pr);
+                        let result = open_pr(pr);
+                        terminal = DashboardTerminal::enter()?;
+                        match result {
+                            Ok(()) => {
+                                status_message = format!("returned from {repository}#{number}");
+                                refresh_dashboard(
+                                    &options,
+                                    &mut report,
+                                    &mut selected,
+                                    &mut status_message,
+                                )?;
+                            }
+                            Err(err) => {
+                                status_message =
+                                    format!("PR review failed for {repository}#{number}: {err}");
+                            }
+                        }
                     }
                 }
                 KeyCode::Char('v') => {
@@ -95,9 +113,25 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                 KeyCode::Char('a') => {
                     if let Some(run_id) = selected_latest_run_id(&report, selected) {
                         terminal.leave()?;
-                        return attach_run(&run_id);
+                        let result = attach_run(&run_id);
+                        terminal = DashboardTerminal::enter()?;
+                        match result {
+                            Ok(()) => {
+                                status_message = format!("returned from agent run {run_id}");
+                                refresh_dashboard(
+                                    &options,
+                                    &mut report,
+                                    &mut selected,
+                                    &mut status_message,
+                                )?;
+                            }
+                            Err(err) => {
+                                status_message = format!("attach failed for run {run_id}: {err}");
+                            }
+                        }
+                    } else {
+                        status_message = "selected PR has no local agent run to attach".to_string();
                     }
-                    status_message = "selected PR has no local agent run to attach".to_string();
                 }
                 KeyCode::Char('c') => {
                     if let Some(run_id) = selected_latest_run_id(&report, selected) {

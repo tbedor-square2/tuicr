@@ -1033,6 +1033,9 @@ pub struct App {
     /// context provider for gap expansion against base/head SHAs and (in a
     /// future PR) for remote comment fetch/submit.
     pub forge_backend: Option<Box<dyn ForgeBackend>>,
+    /// Where `q` should go from an active PR review. Direct PR opens quit;
+    /// PRs opened from tuicr's target selector return to that selector.
+    pub pr_review_return_target: PrReviewReturnTarget,
     /// Remote review threads fetched from the forge for the active PR.
     /// Populated asynchronously after the diff renders (see
     /// `poll_pr_threads_events`). Empty in non-PR modes and during the
@@ -1278,6 +1281,12 @@ pub enum CommentNavigatorKey {
 pub enum CommentNavigatorKind {
     Local(CommentType),
     Remote { muted: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrReviewReturnTarget {
+    Quit,
+    TargetSelector,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1911,6 +1920,7 @@ impl App {
             pr_reload_state: None,
             pr_reload_rx: None,
             forge_backend: None,
+            pr_review_return_target: PrReviewReturnTarget::Quit,
             forge_review_threads: Vec::new(),
             forge_review_summaries: Vec::new(),
             forge_review_threads_loading: false,
@@ -8017,6 +8027,7 @@ impl App {
         Self::load_or_apply_pr_session(&mut opened);
         let backend = create_forge_backend(&request.repository, local_checkout.clone());
         self.enter_pr_diff_mode(backend, opened)?;
+        self.pr_review_return_target = PrReviewReturnTarget::TargetSelector;
         // Kick the remote-thread fetch off on a fresh background thread.
         // The diff view is already up; threads fade in once they land.
         self.spawn_pr_threads_fetch(&details, local_checkout);
@@ -11318,6 +11329,7 @@ index 1111111..2222222 100644
         let repo = ForgeRepository::github("github.com", "agavra", "tuicr");
         app.forge_repository = Some(repo.clone());
         app.pr_tab = PullRequestsTab::new(app.forge_repository.clone());
+        app.pr_review_return_target = PrReviewReturnTarget::TargetSelector;
         app.diff_source = DiffSource::PullRequest(Box::new(PullRequestDiffSource {
             key: PrSessionKey::new(repo, 125, "headsha".to_string()),
             base_sha: "basesha".to_string(),
@@ -11338,6 +11350,64 @@ index 1111111..2222222 100644
         assert_eq!(app.input_mode, InputMode::CommitSelect);
         assert_eq!(app.target_tab, TargetTab::PullRequests);
         // Cancel the background fetch handle to avoid surprising real `gh` calls.
+        app.pr_load_rx = None;
+    }
+
+    #[test]
+    fn q_in_direct_pr_review_quits_to_calling_surface() {
+        // given
+        let mut app = build_app_with_commits(vec![dummy_commit("abc")]);
+        let repo = ForgeRepository::github("github.com", "agavra", "tuicr");
+        app.forge_repository = Some(repo.clone());
+        app.diff_source = DiffSource::PullRequest(Box::new(PullRequestDiffSource {
+            key: PrSessionKey::new(repo, 125, "headsha".to_string()),
+            base_sha: "basesha".to_string(),
+            title: "test pr".to_string(),
+            url: "https://github.com/agavra/tuicr/pull/125".to_string(),
+            head_ref_name: "feat".to_string(),
+            base_ref_name: "main".to_string(),
+            state: "OPEN".to_string(),
+            closed: false,
+            merged: false,
+        }));
+
+        // when
+        crate::handler::handle_diff_action(&mut app, crate::input::Action::Quit);
+
+        // then
+        assert!(app.should_quit);
+        assert_ne!(app.input_mode, InputMode::CommitSelect);
+    }
+
+    #[test]
+    fn colon_q_in_selector_opened_pr_returns_to_pr_selector() {
+        // given
+        let mut app = build_app_with_commits(vec![dummy_commit("abc")]);
+        let repo = ForgeRepository::github("github.com", "agavra", "tuicr");
+        app.forge_repository = Some(repo.clone());
+        app.pr_tab = PullRequestsTab::new(app.forge_repository.clone());
+        app.pr_review_return_target = PrReviewReturnTarget::TargetSelector;
+        app.diff_source = DiffSource::PullRequest(Box::new(PullRequestDiffSource {
+            key: PrSessionKey::new(repo, 125, "headsha".to_string()),
+            base_sha: "basesha".to_string(),
+            title: "test pr".to_string(),
+            url: "https://github.com/agavra/tuicr/pull/125".to_string(),
+            head_ref_name: "feat".to_string(),
+            base_ref_name: "main".to_string(),
+            state: "OPEN".to_string(),
+            closed: false,
+            merged: false,
+        }));
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "q".to_string();
+
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::SubmitInput);
+
+        // then
+        assert!(!app.should_quit);
+        assert_eq!(app.input_mode, InputMode::CommitSelect);
+        assert_eq!(app.target_tab, TargetTab::PullRequests);
         app.pr_load_rx = None;
     }
 
