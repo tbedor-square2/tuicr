@@ -11292,6 +11292,209 @@ index 1111111..2222222 100644
     }
 
     #[test]
+    fn should_complete_agent_dispatch_command() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent d".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::CompleteCommand);
+        // then
+        assert_eq!(app.command_buffer, "agent dispatch");
+        assert!(app.command_completion.is_none());
+    }
+
+    #[test]
+    fn should_complete_agent_common_prefix_before_cycling() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::CompleteCommand);
+        // then
+        assert_eq!(app.command_buffer, "agent ");
+        assert!(app.command_completion.is_none());
+    }
+
+    #[test]
+    fn should_complete_agent_dispatch_thread_command() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent dispatch-".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::CompleteCommand);
+        // then
+        assert_eq!(app.command_buffer, "agent dispatch-thread");
+        assert!(app.command_completion.is_none());
+    }
+
+    #[test]
+    fn should_complete_agent_copy_url_command() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent c".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::CompleteCommand);
+        // then
+        assert_eq!(app.command_buffer, "agent copy-url");
+        assert!(app.command_completion.is_none());
+    }
+
+    #[test]
+    fn should_complete_agent_status_command() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent s".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::CompleteCommand);
+        // then
+        assert_eq!(app.command_buffer, "agent status");
+        assert!(app.command_completion.is_none());
+    }
+
+    #[test]
+    fn should_warn_when_agent_dispatch_without_pr_mode() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent dispatch".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::SubmitInput);
+        // then
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.message
+                .as_ref()
+                .map(|message| message.message_type.clone()),
+            Some(MessageType::Warning)
+        );
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|message| message.content.contains("only applies in PR mode"))
+        );
+    }
+
+    #[test]
+    fn should_warn_when_agent_dispatch_thread_without_pr_mode() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent dispatch-thread".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::SubmitInput);
+        // then
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.message
+                .as_ref()
+                .map(|message| message.message_type.clone()),
+            Some(MessageType::Warning)
+        );
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|message| message.content.contains("only applies in PR mode"))
+        );
+    }
+
+    #[test]
+    fn should_warn_when_agent_copy_url_without_pr_mode() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent copy-url".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::SubmitInput);
+        // then
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.message
+                .as_ref()
+                .map(|message| message.message_type.clone()),
+            Some(MessageType::Warning)
+        );
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|message| message.content.contains("only applies in PR mode"))
+        );
+    }
+
+    #[test]
+    fn should_warn_when_agent_status_without_pr_mode() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent status".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::SubmitInput);
+        // then
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.message
+                .as_ref()
+                .map(|message| message.message_type.clone()),
+            Some(MessageType::Warning)
+        );
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|message| message.content.contains("only applies in PR mode"))
+        );
+    }
+
+    #[test]
+    fn should_warn_when_agent_resolve_without_pr_mode() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent resolve".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::SubmitInput);
+        // then
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.message
+                .as_ref()
+                .map(|message| message.message_type.clone()),
+            Some(MessageType::Warning)
+        );
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|message| message.content.contains("only applies in PR mode"))
+        );
+    }
+
+    #[test]
+    fn should_warn_when_agent_reply_has_no_body() {
+        // given
+        let mut app = build_app();
+        app.input_mode = InputMode::Command;
+        app.command_buffer = "agent reply".to_string();
+        // when
+        crate::handler::handle_command_action(&mut app, crate::input::Action::SubmitInput);
+        // then
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.message
+                .as_ref()
+                .map(|message| message.message_type.clone()),
+            Some(MessageType::Warning)
+        );
+        assert!(
+            app.message
+                .as_ref()
+                .is_some_and(|message| message.content.contains("agent reply <body>"))
+        );
+    }
+
+    #[test]
     fn should_leave_unknown_command_completion_unchanged() {
         // given
         let mut app = build_app();
@@ -11583,6 +11786,8 @@ index 1111111..2222222 100644
             id: "T".to_string(),
             path: "src/lib.rs".to_string(),
             line: Some(line),
+            current_line: Some(line),
+            original_line: Some(line),
             side: RemoteCommentSide::Right,
             is_resolved: resolved,
             is_outdated: outdated,
@@ -11591,6 +11796,7 @@ index 1111111..2222222 100644
                 author: Some("alice".to_string()),
                 body: body.to_string(),
                 created_at: None,
+                diff_hunk: None,
                 in_reply_to: None,
                 url: "https://example.com/c".to_string(),
             }],
@@ -13662,6 +13868,8 @@ mod expand_gap_tests {
             id: "T1".into(),
             path: "b.rs".into(),
             line: Some(1),
+            current_line: Some(1),
+            original_line: Some(1),
             side: RemoteCommentSide::Right,
             is_resolved: false,
             is_outdated: false,
@@ -13670,6 +13878,7 @@ mod expand_gap_tests {
                 author: Some("alice".into()),
                 body: "first\nsecond\nthird\nfourth".into(),
                 created_at: None,
+                diff_hunk: None,
                 in_reply_to: None,
                 url: "https://example.com/c1".into(),
             }],
@@ -13723,6 +13932,8 @@ mod expand_gap_tests {
             id: "T1".into(),
             path: "b.rs".into(),
             line: Some(2),
+            current_line: Some(2),
+            original_line: Some(2),
             side: RemoteCommentSide::Right,
             is_resolved: false,
             is_outdated: false,
@@ -13731,6 +13942,7 @@ mod expand_gap_tests {
                 author: Some("alice".into()),
                 body: "remote-thread".into(),
                 created_at: None,
+                diff_hunk: None,
                 in_reply_to: None,
                 url: "https://example.com/c1".into(),
             }],

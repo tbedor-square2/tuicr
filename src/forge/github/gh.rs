@@ -49,6 +49,19 @@ pub trait GhCommandRunner {
     }
 }
 
+impl<T> GhCommandRunner for &T
+where
+    T: GhCommandRunner + ?Sized,
+{
+    fn run(&self, args: &[String]) -> GhCommandResult<String> {
+        (*self).run(args)
+    }
+
+    fn run_with_stdin(&self, args: &[String], stdin: &str) -> GhCommandResult<String> {
+        (*self).run_with_stdin(args, stdin)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemGhRunner;
 

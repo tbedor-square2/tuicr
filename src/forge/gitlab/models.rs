@@ -190,6 +190,7 @@ impl GlabDiscussion {
                     author: Some(note.author.username),
                     body: note.body,
                     created_at: note.created_at,
+                    diff_hunk: None,
                     in_reply_to: None,
                     url: String::new(),
                 })
@@ -201,6 +202,8 @@ impl GlabDiscussion {
                 id: self.id,
                 path: String::new(),
                 line: None,
+                current_line: None,
+                original_line: None,
                 side: RemoteCommentSide::Right,
                 is_resolved: false,
                 is_outdated: false,
@@ -245,6 +248,7 @@ impl GlabDiscussion {
                 author: Some(note.author.username),
                 body: note.body,
                 created_at: note.created_at,
+                diff_hunk: None,
                 in_reply_to: None,
                 url: String::new(),
             })
@@ -254,6 +258,8 @@ impl GlabDiscussion {
             id: self.id,
             path,
             line,
+            current_line: line,
+            original_line: line,
             side,
             is_resolved,
             is_outdated: false,

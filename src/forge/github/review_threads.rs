@@ -73,6 +73,8 @@ struct GhReviewComment {
     #[serde(default)]
     created_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    diff_hunk: Option<String>,
+    #[serde(default)]
     url: Option<String>,
     #[serde(default)]
     reply_to: Option<GhReplyRef>,
@@ -207,12 +209,16 @@ fn convert_thread(raw: GhReviewThread) -> RemoteReviewThread {
     // so we still know roughly where the thread was anchored. The
     // `is_outdated` flag drives muted styling + suppression from the
     // default `:comments unresolved` view.
-    let line = raw.line.or(raw.original_line);
+    let current_line = raw.line;
+    let original_line = raw.original_line;
+    let line = current_line.or(original_line);
 
     RemoteReviewThread {
         id: raw.id,
         path: raw.path.unwrap_or_default(),
         line,
+        current_line,
+        original_line,
         side,
         is_resolved: raw.is_resolved,
         is_outdated: raw.is_outdated,
@@ -226,6 +232,7 @@ fn convert_comment(raw: GhReviewComment) -> RemoteReviewComment {
         author: raw.author.and_then(|a| a.login),
         body: raw.body,
         created_at: raw.created_at,
+        diff_hunk: raw.diff_hunk,
         in_reply_to: raw.reply_to.map(|r| r.id),
         url: raw.url.unwrap_or_default(),
     }
@@ -257,6 +264,7 @@ pub(crate) fn build_query(after_cursor: Option<&str>) -> String {
               body
               author {{ login }}
               createdAt
+              diffHunk
               url
               replyTo {{ id }}
             }}

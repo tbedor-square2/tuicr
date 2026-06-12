@@ -41,6 +41,9 @@ pub struct RemoteReviewComment {
     /// Markdown body as written on the forge.
     pub body: String,
     pub created_at: Option<DateTime<Utc>>,
+    /// GitHub's diff hunk text for inline review comments, when available.
+    #[serde(default)]
+    pub diff_hunk: Option<String>,
     /// For reply comments, the ID of the parent comment.
     pub in_reply_to: Option<String>,
     /// Permalink to the comment on the forge.
@@ -112,6 +115,12 @@ pub struct RemoteReviewThread {
     pub path: String,
     /// Anchor line on the chosen side. `None` for fully-outdated threads.
     pub line: Option<u32>,
+    /// Current GitHub anchor line before display fallback to `original_line`.
+    #[serde(default)]
+    pub current_line: Option<u32>,
+    /// Original anchor line before later PR commits moved or removed it.
+    #[serde(default)]
+    pub original_line: Option<u32>,
     pub side: RemoteCommentSide,
     pub is_resolved: bool,
     pub is_outdated: bool,
@@ -258,6 +267,8 @@ mod tests {
             id: id.to_string(),
             path: path.to_string(),
             line,
+            current_line: line,
+            original_line: line,
             side: RemoteCommentSide::Right,
             is_resolved,
             is_outdated,
@@ -266,6 +277,7 @@ mod tests {
                 author: Some("alice".to_string()),
                 body: "Root body".to_string(),
                 created_at: None,
+                diff_hunk: None,
                 in_reply_to: None,
                 url: format!("https://example.com/{id}"),
             }],

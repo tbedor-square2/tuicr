@@ -9,7 +9,7 @@ use crate::forge::remote_comments::PrCommentsVisibility;
 use crate::forge::submit::SubmitEvent;
 use crate::input::Action;
 use crate::model::{ClearScope, LineSide};
-use crate::output::{export_to_clipboard, generate_export_content};
+use crate::output::{copy_text_to_clipboard, export_to_clipboard, generate_export_content};
 use crate::text_edit::{
     delete_char_before, delete_word_before, next_char_boundary, prev_char_boundary,
 };
@@ -76,6 +76,12 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         &["comments hide"],
         CommandKind::Comments(PrCommentsVisibility::Hide),
     ),
+    CommandSpec::new(&["agent dispatch"], CommandKind::AgentDispatch),
+    CommandSpec::new(&["agent dispatch-thread"], CommandKind::AgentDispatchThread),
+    CommandSpec::new(&["agent copy-url"], CommandKind::AgentCopyUrl),
+    CommandSpec::new(&["agent status"], CommandKind::AgentStatus),
+    CommandSpec::new(&["agent reply"], CommandKind::AgentReply),
+    CommandSpec::new(&["agent resolve"], CommandKind::AgentResolve),
 ];
 
 /// CommandSpec is the single registry entry used by both completion and
@@ -119,6 +125,12 @@ enum CommandKind {
     SubmitPicker,
     Submit(SubmitEvent),
     Comments(PrCommentsVisibility),
+    AgentDispatch,
+    AgentDispatchThread,
+    AgentCopyUrl,
+    AgentStatus,
+    AgentReply,
+    AgentResolve,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,7 +528,10 @@ pub fn handle_command_action(app: &mut App, action: Action) {
         Action::SubmitInput => {
             app.command_completion = None;
             let cmd = app.command_buffer.trim().to_string();
-            let after_dispatch = if let Some(spec) = command_spec_for(&cmd) {
+            let after_dispatch = if let Some(body) = cmd.strip_prefix("agent reply ") {
+                reply_to_selected_agent_thread(app, body.trim().to_string());
+                CommandAfterDispatch::ExitCommandMode
+            } else if let Some(spec) = command_spec_for(&cmd) {
                 dispatch_command(app, spec.kind)
             } else if let Some((lineno, side)) = parse_lineno_command(&cmd) {
                 app.go_to_source_line(lineno, side);
@@ -821,7 +836,285 @@ fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
             set_remote_comments_visibility(app, visibility);
             CommandAfterDispatch::ExitCommandMode
         }
+        CommandKind::AgentDispatch => {
+            dispatch_agent_for_current_pr(app);
+            CommandAfterDispatch::ExitCommandMode
+        }
+        CommandKind::AgentDispatchThread => {
+            dispatch_agent_for_selected_thread(app);
+            CommandAfterDispatch::ExitCommandMode
+        }
+        CommandKind::AgentCopyUrl => {
+            copy_selected_agent_thread_url(app);
+            CommandAfterDispatch::ExitCommandMode
+        }
+        CommandKind::AgentStatus => {
+            show_agent_status_for_current_pr(app);
+            CommandAfterDispatch::ExitCommandMode
+        }
+        CommandKind::AgentReply => {
+            app.set_warning("Usage: :agent reply <body>");
+            CommandAfterDispatch::ExitCommandMode
+        }
+        CommandKind::AgentResolve => {
+            resolve_selected_agent_thread(app);
+            CommandAfterDispatch::ExitCommandMode
+        }
     }
+}
+
+fn show_agent_status_for_current_pr(app: &mut App) {
+    let app::DiffSource::PullRequest(pr) = &app.diff_source else {
+        app.set_warning(":agent status only applies in PR mode");
+        return;
+    };
+    let repository = pr.key.repository.display_name();
+    let pr_number = pr.key.number;
+    match crate::agent::dispatch::list_runs() {
+        Ok(runs) => {
+            if let Some(run) = runs
+                .into_iter()
+                .find(|run| run.repository == repository && run.pr == pr_number)
+            {
+                let status = crate::agent::prs_cli::dispatch_status_label(run.status);
+                let tmux = run
+                    .tmux_session
+                    .as_deref()
+                    .map(|session| format!(" tmux={session}"))
+                    .unwrap_or_default();
+                app.set_message(format!(
+                    "Latest agent run {status}: {}#{} run {}{} - {}",
+                    run.repository,
+                    run.pr,
+                    run.run_id.chars().take(8).collect::<String>(),
+                    tmux,
+                    run.message
+                ));
+            } else {
+                app.set_message(format!(
+                    "No local agent runs found for {repository}#{pr_number}"
+                ));
+            }
+        }
+        Err(err) => app.set_error(format!("Agent status failed: {err}")),
+    }
+}
+
+fn dispatch_agent_for_current_pr(app: &mut App) {
+    let app::DiffSource::PullRequest(pr) = &app.diff_source else {
+        app.set_warning(":agent dispatch only applies in PR mode");
+        return;
+    };
+    if let Some(reason) = pr.read_only_reason() {
+        app.set_warning(format!("Cannot dispatch agent: PR is {reason}"));
+        return;
+    }
+    let repository = pr.key.repository.display_name();
+    let pr_number = pr.key.number;
+    let agent_config = crate::agent::prs_cli::load_agent_config();
+    match crate::agent::dispatch::dispatch(crate::agent::dispatch::DispatchOptions {
+        repo: repository.clone(),
+        pr: pr_number,
+        dry_run: false,
+        allow_non_owned: false,
+        agent_command: crate::agent::prs_cli::agent_command_from_config(None, &agent_config),
+        workspace_root: agent_config.workspace_root.clone(),
+        worktree_root: agent_config.worktree_root.clone(),
+        robot_logins: crate::agent::prs_cli::configured_robot_logins(Vec::new(), &agent_config),
+        ignored_comment_patterns: crate::agent::prs_cli::configured_ignored_comment_patterns(
+            &agent_config,
+        ),
+        outdated_thread_mode: crate::agent::prs_cli::configured_outdated_thread_mode(&agent_config),
+        feedback_thread_id: None,
+    }) {
+        Ok(report) => {
+            let status = crate::agent::prs_cli::dispatch_status_label(report.status);
+            let tmux = report
+                .tmux_session
+                .as_deref()
+                .map(|session| format!(" tmux={session}"))
+                .unwrap_or_default();
+            app.set_message(format!(
+                "Agent dispatch {status}: {}#{} run {}{}",
+                report.repository,
+                report.pr,
+                report.run_id.chars().take(8).collect::<String>(),
+                tmux
+            ));
+        }
+        Err(err) => app.set_error(format!("Agent dispatch failed: {err}")),
+    }
+}
+
+fn dispatch_agent_for_selected_thread(app: &mut App) {
+    let Some(selected) = selected_remote_thread(app, ":agent dispatch-thread") else {
+        return;
+    };
+    let agent_config = crate::agent::prs_cli::load_agent_config();
+    match crate::agent::dispatch::dispatch(crate::agent::dispatch::DispatchOptions {
+        repo: selected.repository.clone(),
+        pr: selected.pr,
+        dry_run: false,
+        allow_non_owned: false,
+        agent_command: crate::agent::prs_cli::agent_command_from_config(None, &agent_config),
+        workspace_root: agent_config.workspace_root.clone(),
+        worktree_root: agent_config.worktree_root.clone(),
+        robot_logins: crate::agent::prs_cli::configured_robot_logins(Vec::new(), &agent_config),
+        ignored_comment_patterns: crate::agent::prs_cli::configured_ignored_comment_patterns(
+            &agent_config,
+        ),
+        outdated_thread_mode: crate::agent::prs_cli::configured_outdated_thread_mode(&agent_config),
+        feedback_thread_id: Some(selected.thread_id.clone()),
+    }) {
+        Ok(report) => {
+            let status = crate::agent::prs_cli::dispatch_status_label(report.status);
+            let tmux = report
+                .tmux_session
+                .as_deref()
+                .map(|session| format!(" tmux={session}"))
+                .unwrap_or_default();
+            app.set_message(format!(
+                "Agent dispatch-thread {status}: {}#{} thread {} run {}{}",
+                report.repository,
+                report.pr,
+                selected.thread_id.chars().take(8).collect::<String>(),
+                report.run_id.chars().take(8).collect::<String>(),
+                tmux
+            ));
+        }
+        Err(err) => app.set_error(format!("Agent dispatch-thread failed: {err}")),
+    }
+}
+
+fn copy_selected_agent_thread_url(app: &mut App) {
+    let Some(selected) = selected_remote_thread(app, ":agent copy-url") else {
+        return;
+    };
+    let Some(url) = selected.url.as_deref() else {
+        app.set_warning("Selected GitHub review thread has no URL");
+        return;
+    };
+    match copy_text_to_clipboard(url) {
+        Ok(via_terminal) => {
+            let suffix = if via_terminal { " (via terminal)" } else { "" };
+            app.set_message(format!("Copied GitHub thread URL to clipboard{suffix}"));
+        }
+        Err(err) => app.set_error(format!("Copy GitHub thread URL failed: {err}")),
+    }
+}
+
+fn resolve_selected_agent_thread(app: &mut App) {
+    let Some(selected) = selected_remote_thread(app, ":agent resolve") else {
+        return;
+    };
+    let agent_config = crate::agent::prs_cli::load_agent_config();
+    match crate::agent::github_actions::resolve_thread(
+        crate::agent::github_actions::ResolveOptions {
+            repo: selected.repository,
+            pr: selected.pr,
+            thread_id: selected.thread_id.clone(),
+            expected_head_sha: None,
+            dry_run: false,
+            allow_non_owned: false,
+            robot_logins: crate::agent::prs_cli::configured_robot_logins(Vec::new(), &agent_config),
+            ignored_comment_patterns: crate::agent::prs_cli::configured_ignored_comment_patterns(
+                &agent_config,
+            ),
+            outdated_thread_mode: crate::agent::prs_cli::configured_outdated_thread_mode(
+                &agent_config,
+            ),
+        },
+    ) {
+        Ok(report) => {
+            if let Some(thread) = app.forge_review_threads.get_mut(selected.thread_idx) {
+                thread.is_resolved = report.is_resolved.unwrap_or(true);
+            }
+            app.rebuild_annotations();
+            app.set_message(format!("Resolved GitHub thread {}", selected.thread_id));
+        }
+        Err(err) => app.set_error(format!("Resolve thread failed: {err}")),
+    }
+}
+
+fn reply_to_selected_agent_thread(app: &mut App, body: String) {
+    if body.trim().is_empty() {
+        app.set_warning("Usage: :agent reply <body>");
+        return;
+    }
+    let Some(selected) = selected_remote_thread(app, ":agent reply") else {
+        return;
+    };
+    let agent_config = crate::agent::prs_cli::load_agent_config();
+    match crate::agent::github_actions::reply(crate::agent::github_actions::ReplyOptions {
+        repo: selected.repository,
+        pr: selected.pr,
+        feedback_id: None,
+        thread_id: Some(selected.thread_id.clone()),
+        body,
+        resolve: false,
+        expected_head_sha: None,
+        dry_run: false,
+        allow_non_owned: false,
+        robot_logins: crate::agent::prs_cli::configured_robot_logins(Vec::new(), &agent_config),
+        ignored_comment_patterns: crate::agent::prs_cli::configured_ignored_comment_patterns(
+            &agent_config,
+        ),
+        outdated_thread_mode: crate::agent::prs_cli::configured_outdated_thread_mode(&agent_config),
+    }) {
+        Ok(report) => {
+            app.set_message(format!(
+                "Replied to GitHub thread {}{}",
+                selected.thread_id,
+                report
+                    .reply
+                    .and_then(|reply| reply.url)
+                    .map(|url| format!(" {url}"))
+                    .unwrap_or_default()
+            ));
+        }
+        Err(err) => app.set_error(format!("Reply failed: {err}")),
+    }
+}
+
+struct SelectedRemoteThread {
+    repository: String,
+    pr: u64,
+    thread_id: String,
+    thread_idx: usize,
+    url: Option<String>,
+}
+
+fn selected_remote_thread(app: &mut App, command: &str) -> Option<SelectedRemoteThread> {
+    let app::DiffSource::PullRequest(pr) = &app.diff_source else {
+        app.set_warning(format!("{command} only applies in PR mode"));
+        return None;
+    };
+    if let Some(reason) = pr.read_only_reason() {
+        app.set_warning(format!("Cannot use {command}: PR is {reason}"));
+        return None;
+    }
+    let Some(app::AnnotatedLine::RemoteThreadLine { thread_idx }) =
+        app.line_annotations.get(app.diff_state.cursor_line)
+    else {
+        app.set_warning("Move the cursor onto a GitHub review thread first");
+        return None;
+    };
+    let Some(thread) = app.forge_review_threads.get(*thread_idx) else {
+        app.set_warning("Selected GitHub review thread is no longer loaded");
+        return None;
+    };
+    Some(SelectedRemoteThread {
+        repository: pr.key.repository.display_name(),
+        pr: pr.key.number,
+        thread_id: thread.id.clone(),
+        thread_idx: *thread_idx,
+        url: thread
+            .comments
+            .iter()
+            .rev()
+            .find(|comment| !comment.url.is_empty())
+            .map(|comment| comment.url.clone()),
+    })
 }
 
 fn reload_review(app: &mut App) {

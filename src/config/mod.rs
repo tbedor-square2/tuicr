@@ -36,6 +36,25 @@ impl Default for ForgeConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct AgentConfig {
+    pub workspace_root: Option<PathBuf>,
+    pub worktree_root: Option<PathBuf>,
+    pub github_owners: Option<Vec<String>>,
+    pub repository_include: Option<Vec<String>>,
+    pub repository_exclude: Option<Vec<String>>,
+    pub robot_logins: Option<Vec<String>>,
+    pub ignored_comment_patterns: Option<Vec<String>>,
+    pub agent_command: Option<String>,
+    pub global_concurrency: Option<usize>,
+    pub repository_concurrency: Option<usize>,
+    pub notification_command: Option<String>,
+    pub ci_poll_interval_seconds: Option<usize>,
+    pub max_ci_retries: Option<usize>,
+    pub outdated_thread_relevance: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct AppConfig {
     pub theme: Option<String>,
     pub theme_dark: Option<String>,
@@ -66,6 +85,8 @@ pub struct AppConfig {
     /// `[forge]` section settings. Always present; `None` means "no override"
     /// and downstream code should treat it as `ForgeConfig::default()`.
     pub forge: Option<ForgeConfig>,
+    /// `[agent]` section settings for PR orchestration commands.
+    pub agent: Option<AgentConfig>,
 }
 
 /// Known top-level config keys. Used to warn about typos.
@@ -91,9 +112,26 @@ const KNOWN_KEYS: &[&str] = &[
     "single_file_view",
     "username",
     "forge",
+    "agent",
 ];
 
 const FORGE_KNOWN_KEYS: &[&str] = &["comment_type_prefix"];
+const AGENT_KNOWN_KEYS: &[&str] = &[
+    "workspace_root",
+    "worktree_root",
+    "github_owners",
+    "repository_include",
+    "repository_exclude",
+    "robot_logins",
+    "ignored_comment_patterns",
+    "agent_command",
+    "global_concurrency",
+    "repository_concurrency",
+    "notification_command",
+    "ci_poll_interval_seconds",
+    "max_ci_retries",
+    "outdated_thread_relevance",
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigLoadOutcome {
@@ -302,6 +340,9 @@ fn load_config_from_path(path: &Path) -> Result<ConfigLoadOutcome> {
         forge: table
             .get("forge")
             .and_then(|v| parse_forge(v, &mut warnings)),
+        agent: table
+            .get("agent")
+            .and_then(|v| parse_agent(v, &mut warnings)),
     };
 
     for key in table.keys() {
@@ -354,6 +395,221 @@ fn read_forge_bool(table: &toml::Table, key: &str, warnings: &mut Vec<String>) -
     } else {
         warnings.push(format!(
             "Warning: Config key 'forge.{key}' must be a boolean; ignoring value"
+        ));
+        None
+    }
+}
+
+fn parse_agent(value: &Value, warnings: &mut Vec<String>) -> Option<AgentConfig> {
+    let Some(table) = value.as_table() else {
+        warnings.push("Warning: Config key 'agent' must be a table; ignoring value".to_string());
+        return None;
+    };
+
+    for key in table.keys() {
+        if !AGENT_KNOWN_KEYS.contains(&key.as_str()) {
+            warnings.push(format!(
+                "Warning: Unknown config key 'agent.{key}', ignoring"
+            ));
+        }
+    }
+
+    let mut cfg = AgentConfig::default();
+    let mut any_override = false;
+
+    set_if_some(
+        &mut cfg.workspace_root,
+        read_agent_path(table, "workspace_root", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.worktree_root,
+        read_agent_path(table, "worktree_root", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.github_owners,
+        read_agent_string_vec(table, "github_owners", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.repository_include,
+        read_agent_string_vec(table, "repository_include", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.repository_exclude,
+        read_agent_string_vec(table, "repository_exclude", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.robot_logins,
+        read_agent_string_vec(table, "robot_logins", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.ignored_comment_patterns,
+        read_agent_string_vec(table, "ignored_comment_patterns", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.agent_command,
+        read_agent_string(table, "agent_command", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.global_concurrency,
+        read_agent_usize(table, "global_concurrency", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.repository_concurrency,
+        read_agent_usize(table, "repository_concurrency", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.notification_command,
+        read_agent_string(table, "notification_command", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.ci_poll_interval_seconds,
+        read_agent_usize(table, "ci_poll_interval_seconds", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.max_ci_retries,
+        read_agent_usize(table, "max_ci_retries", warnings),
+        &mut any_override,
+    );
+    set_if_some(
+        &mut cfg.outdated_thread_relevance,
+        read_agent_enum(
+            table,
+            "outdated_thread_relevance",
+            &["recheck", "include", "ignore"],
+            warnings,
+        ),
+        &mut any_override,
+    );
+
+    if any_override { Some(cfg) } else { None }
+}
+
+fn set_if_some<T>(target: &mut Option<T>, value: Option<T>, any_override: &mut bool) {
+    if value.is_some() {
+        *target = value;
+        *any_override = true;
+    }
+}
+
+fn read_agent_string(table: &toml::Table, key: &str, warnings: &mut Vec<String>) -> Option<String> {
+    read_agent_string_raw(table, key, warnings).and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            warnings.push(format!(
+                "Warning: Config key 'agent.{key}' cannot be empty; ignoring value"
+            ));
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn read_agent_path(table: &toml::Table, key: &str, warnings: &mut Vec<String>) -> Option<PathBuf> {
+    read_agent_string(table, key, warnings).map(PathBuf::from)
+}
+
+fn read_agent_string_raw(
+    table: &toml::Table,
+    key: &str,
+    warnings: &mut Vec<String>,
+) -> Option<String> {
+    let val = table.get(key)?;
+    if let Some(s) = val.as_str() {
+        Some(s.to_string())
+    } else {
+        warnings.push(format!(
+            "Warning: Config key 'agent.{key}' must be a string; ignoring value"
+        ));
+        None
+    }
+}
+
+fn read_agent_usize(table: &toml::Table, key: &str, warnings: &mut Vec<String>) -> Option<usize> {
+    let val = table.get(key)?;
+    if let Some(n) = val.as_integer() {
+        if n >= 0 {
+            Some(n as usize)
+        } else {
+            warnings.push(format!(
+                "Warning: Config key 'agent.{key}' must be a non-negative integer; ignoring value"
+            ));
+            None
+        }
+    } else {
+        warnings.push(format!(
+            "Warning: Config key 'agent.{key}' must be an integer; got '{}', ignoring",
+            val
+        ));
+        None
+    }
+}
+
+fn read_agent_string_vec(
+    table: &toml::Table,
+    key: &str,
+    warnings: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    let val = table.get(key)?;
+    let Some(items) = val.as_array() else {
+        warnings.push(format!(
+            "Warning: Config key 'agent.{key}' must be an array of strings; ignoring value"
+        ));
+        return None;
+    };
+    let mut parsed = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let Some(raw) = item.as_str() else {
+            warnings.push(format!(
+                "Warning: Config key 'agent.{key}[{index}]' must be a string; ignoring entry"
+            ));
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            warnings.push(format!(
+                "Warning: Config key 'agent.{key}[{index}]' cannot be empty; ignoring entry"
+            ));
+        } else {
+            parsed.push(trimmed.to_string());
+        }
+    }
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+fn read_agent_enum(
+    table: &toml::Table,
+    key: &str,
+    allowed: &[&str],
+    warnings: &mut Vec<String>,
+) -> Option<String> {
+    let raw = read_agent_string(table, key, warnings)?;
+    if allowed.contains(&raw.as_str()) {
+        Some(raw)
+    } else {
+        let choices = allowed
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        warnings.push(format!(
+            "Warning: Config key 'agent.{key}' must be {choices}; got \"{raw}\", ignoring"
         ));
         None
     }
@@ -624,6 +880,84 @@ mod tests {
         let outcome = parse_config("");
         assert_eq!(outcome.config, Some(AppConfig::default()));
         assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_parse_agent_config_section() {
+        let outcome = parse_config(
+            r#"
+[agent]
+workspace_root = "/Users/tbedor/Development"
+worktree_root = "/Users/tbedor/Development/worktrees"
+github_owners = ["squareup", "block"]
+repository_include = ["squareup/java"]
+repository_exclude = ["squareup/archived"]
+robot_logins = ["chatgpt-codex-connector[bot]"]
+ignored_comment_patterns = ["^r:"]
+agent_command = "codex exec -"
+global_concurrency = 4
+repository_concurrency = 1
+notification_command = "terminal-notifier"
+ci_poll_interval_seconds = 120
+max_ci_retries = 3
+outdated_thread_relevance = "recheck"
+"#,
+        );
+
+        let agent = outcome
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.agent.as_ref())
+            .expect("agent config");
+        assert_eq!(
+            agent.workspace_root.as_deref(),
+            Some(Path::new("/Users/tbedor/Development"))
+        );
+        assert_eq!(
+            agent.worktree_root.as_deref(),
+            Some(Path::new("/Users/tbedor/Development/worktrees"))
+        );
+        assert_eq!(
+            agent.github_owners.as_deref(),
+            Some(&["squareup".to_string(), "block".to_string()][..])
+        );
+        assert_eq!(agent.agent_command.as_deref(), Some("codex exec -"));
+        assert_eq!(agent.global_concurrency, Some(4));
+        assert_eq!(agent.repository_concurrency, Some(1));
+        assert_eq!(agent.ci_poll_interval_seconds, Some(120));
+        assert_eq!(agent.max_ci_retries, Some(3));
+        assert_eq!(agent.outdated_thread_relevance.as_deref(), Some("recheck"));
+        assert!(outcome.warnings.is_empty());
+    }
+
+    #[test]
+    fn should_warn_on_invalid_agent_config_values() {
+        let outcome = parse_config(
+            r#"
+[agent]
+github_owners = "squareup"
+global_concurrency = -1
+outdated_thread_relevance = "skip"
+extra = true
+"#,
+        );
+
+        let agent = outcome.config.as_ref().and_then(|cfg| cfg.agent.as_ref());
+        assert_eq!(agent, None);
+        assert!(outcome.warnings.iter().any(|warning| {
+            warning == "Warning: Config key 'agent.github_owners' must be an array of strings; ignoring value"
+        }));
+        assert!(outcome.warnings.iter().any(|warning| {
+            warning == "Warning: Config key 'agent.global_concurrency' must be a non-negative integer; ignoring value"
+        }));
+        assert!(outcome.warnings.iter().any(|warning| {
+            warning.contains("Config key 'agent.outdated_thread_relevance' must be")
+        }));
+        assert!(
+            outcome.warnings.iter().any(|warning| {
+                warning == "Warning: Unknown config key 'agent.extra', ignoring"
+            })
+        );
     }
 
     #[test]

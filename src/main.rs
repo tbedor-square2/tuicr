@@ -43,6 +43,13 @@ fn main() -> anyhow::Result<()> {
     // Parse CLI arguments and resolve theme
     // This also configures syntax highlighting colors before diff parsing
     let mut cli_args = profile::time("startup.parse_cli_args", parse_cli_args);
+    if let Some(prs_command) = cli_args.prs_command.take() {
+        if let Err(err) = tuicr::agent::prs_cli::run(prs_command) {
+            eprintln!("Error: {err}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if let Some(review_command) = cli_args.review_command.take() {
         if let Err(err) = tuicr::review_cli::run(review_command) {
             eprintln!("Error: {err}");

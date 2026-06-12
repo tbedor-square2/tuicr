@@ -34,6 +34,8 @@ pub struct CliArgs {
     pub repo_url: Option<String>,
     /// Non-interactive review session operation.
     pub review_command: Option<ReviewCommand>,
+    /// Non-interactive PR automation operation.
+    pub prs_command: Option<PrsCommand>,
 }
 
 #[derive(Parser, Debug)]
@@ -140,6 +142,11 @@ enum Subcmd {
     Review {
         #[command(subcommand)]
         command: ReviewCommand,
+    },
+    /// Inspect PR feedback and agent orchestration state.
+    Prs {
+        #[command(subcommand)]
+        command: PrsCommand,
     },
 }
 
@@ -254,6 +261,399 @@ pub enum ReviewCommand {
     },
 }
 
+/// Non-interactive PR automation commands.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum PrsCommand {
+    /// List open PRs authored by a user.
+    List {
+        /// GitHub owner/org to search. May be repeated. Defaults to squareup.
+        #[arg(long = "owner", value_name = "OWNER")]
+        owners: Vec<String>,
+
+        /// Repository to include, as owner/repo. May be repeated.
+        #[arg(long = "repository", value_name = "OWNER/REPO")]
+        repositories: Vec<String>,
+
+        /// Author login. Defaults to @me.
+        #[arg(long, value_name = "LOGIN", default_value = "@me")]
+        author: String,
+
+        /// Show only draft PRs.
+        #[arg(long, conflicts_with = "ready")]
+        draft: bool,
+
+        /// Show only non-draft PRs.
+        #[arg(long, conflicts_with = "draft")]
+        ready: bool,
+
+        /// Filter by GitHub review state.
+        #[arg(long, value_enum)]
+        review: Option<ReviewFilterArg>,
+
+        /// Maximum PRs per owner.
+        #[arg(long, value_name = "N", default_value_t = 50)]
+        limit: usize,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show a PR dashboard with feedback, CI, and agent run status.
+    Dashboard {
+        /// GitHub owner/org to search. May be repeated. Defaults to squareup.
+        #[arg(long = "owner", value_name = "OWNER")]
+        owners: Vec<String>,
+
+        /// Repository to include, as owner/repo. May be repeated.
+        #[arg(long = "repository", value_name = "OWNER/REPO")]
+        repositories: Vec<String>,
+
+        /// Author login. Defaults to @me.
+        #[arg(long, value_name = "LOGIN", default_value = "@me")]
+        author: String,
+
+        /// Show only draft PRs.
+        #[arg(long, conflicts_with = "ready")]
+        draft: bool,
+
+        /// Show only non-draft PRs.
+        #[arg(long, conflicts_with = "draft")]
+        ready: bool,
+
+        /// Filter by GitHub review state.
+        #[arg(long, value_enum)]
+        review: Option<ReviewFilterArg>,
+
+        /// Show only PRs with actionable feedback or failing checks.
+        #[arg(long)]
+        needs_action: bool,
+
+        /// Maximum PRs per owner.
+        #[arg(long, value_name = "N", default_value_t = 50)]
+        limit: usize,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long, conflicts_with = "tui")]
+        json: bool,
+
+        /// Open the interactive PR dashboard.
+        #[arg(long, conflicts_with = "json")]
+        tui: bool,
+
+        /// Allow dashboard enrichment for PRs not authored by the configured user.
+        #[arg(long)]
+        allow_non_owned: bool,
+    },
+
+    /// List normalized GitHub check status for one pull request.
+    Checks {
+        /// Repo selector: a checkout path, owner/repo, host/owner/repo, or GitHub URL.
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: String,
+
+        /// Pull request number.
+        #[arg(long, value_name = "NUMBER", value_parser = parse_positive_pr_number)]
+        pr: u64,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Dispatch a tmux-backed agent run for actionable feedback or failing checks.
+    Dispatch {
+        /// Repo selector: a checkout path, owner/repo, host/owner/repo, or GitHub URL.
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: String,
+
+        /// Pull request number.
+        #[arg(long, value_name = "NUMBER", value_parser = parse_positive_pr_number)]
+        pr: u64,
+
+        /// Write the prompt/run record but do not start tmux.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+
+        /// Allow dispatch for PRs not authored by the configured user.
+        #[arg(long)]
+        allow_non_owned: bool,
+
+        /// Agent command to run inside tmux. The prompt is passed on stdin.
+        #[arg(long, value_name = "COMMAND")]
+        agent_command: Option<String>,
+    },
+
+    /// Refuse to continue if a PR head SHA moved since dispatch.
+    GuardHead {
+        /// Repo selector: a checkout path, owner/repo, host/owner/repo, or GitHub URL.
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: String,
+
+        /// Pull request number.
+        #[arg(long, value_name = "NUMBER", value_parser = parse_positive_pr_number)]
+        pr: u64,
+
+        /// Expected PR head SHA.
+        #[arg(long, value_name = "SHA")]
+        expected_head_sha: String,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+
+        /// Allow checking PRs not authored by the configured user.
+        #[arg(long)]
+        allow_non_owned: bool,
+    },
+
+    /// Reply to actionable PR feedback on GitHub.
+    Reply {
+        /// Repo selector: a checkout path, owner/repo, host/owner/repo, or GitHub URL.
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: String,
+
+        /// Pull request number.
+        #[arg(long, value_name = "NUMBER", value_parser = parse_positive_pr_number)]
+        pr: u64,
+
+        /// Feedback item id from `tuicr prs feedback --json`.
+        #[arg(long, value_name = "ID", conflicts_with = "thread_id")]
+        feedback_id: Option<String>,
+
+        /// Review thread node id to reply to directly.
+        #[arg(long, value_name = "ID", conflicts_with = "feedback_id")]
+        thread_id: Option<String>,
+
+        /// Reply body. The required agent prefix is added automatically.
+        #[arg(long, value_name = "TEXT", conflicts_with = "input")]
+        body: Option<String>,
+
+        /// Reply body as literal text, @path, or - for stdin.
+        #[arg(long, value_name = "TEXT|@FILE|-", conflicts_with = "body")]
+        input: Option<String>,
+
+        /// Resolve the review thread after posting the reply.
+        #[arg(long)]
+        resolve: bool,
+
+        /// Refuse to post if the PR head SHA no longer matches this value.
+        #[arg(long, value_name = "SHA")]
+        expected_head_sha: Option<String>,
+
+        /// Validate target/body but do not post to GitHub.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+
+        /// Allow replying on PRs not authored by the configured user.
+        #[arg(long)]
+        allow_non_owned: bool,
+    },
+
+    /// Resolve a GitHub review thread.
+    Resolve {
+        /// Repo selector: a checkout path, owner/repo, host/owner/repo, or GitHub URL.
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: String,
+
+        /// Pull request number.
+        #[arg(long, value_name = "NUMBER", value_parser = parse_positive_pr_number)]
+        pr: u64,
+
+        /// Review thread node id.
+        #[arg(long, value_name = "ID")]
+        thread_id: String,
+
+        /// Refuse to resolve if the PR head SHA no longer matches this value.
+        #[arg(long, value_name = "SHA")]
+        expected_head_sha: Option<String>,
+
+        /// Validate ownership/target but do not mutate GitHub.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+
+        /// Allow resolving threads on PRs not authored by the configured user.
+        #[arg(long)]
+        allow_non_owned: bool,
+    },
+
+    /// Inspect local agent run records.
+    Runs {
+        #[command(subcommand)]
+        command: PrsRunsCommand,
+    },
+
+    /// Poll authored PRs and dispatch agents for feedback or failing CI.
+    Watch {
+        /// GitHub owner/org to search. May be repeated. Defaults to squareup.
+        #[arg(long = "owner", value_name = "OWNER")]
+        owners: Vec<String>,
+
+        /// Repository to include, as owner/repo. May be repeated.
+        #[arg(long = "repository", value_name = "OWNER/REPO")]
+        repositories: Vec<String>,
+
+        /// Author login. Defaults to @me.
+        #[arg(long, value_name = "LOGIN", default_value = "@me")]
+        author: String,
+
+        /// Show only draft PRs.
+        #[arg(long, conflicts_with = "ready")]
+        draft: bool,
+
+        /// Show only non-draft PRs.
+        #[arg(long, conflicts_with = "draft")]
+        ready: bool,
+
+        /// Filter by GitHub review state.
+        #[arg(long, value_enum)]
+        review: Option<ReviewFilterArg>,
+
+        /// Maximum PRs per owner.
+        #[arg(long, value_name = "N", default_value_t = 50)]
+        limit: usize,
+
+        /// Write prompts/run records but do not start tmux sessions.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+
+        /// Run one polling iteration and exit.
+        #[arg(long)]
+        once: bool,
+
+        /// Seconds to wait between polling iterations.
+        #[arg(long, value_name = "SECONDS", default_value_t = 300)]
+        interval_seconds: u64,
+
+        /// Stop after this many polling iterations.
+        #[arg(long, value_name = "N")]
+        max_iterations: Option<usize>,
+
+        /// Maximum CI repair dispatches per check name and PR head SHA.
+        #[arg(long, value_name = "N", default_value_t = 2)]
+        max_ci_retries: u32,
+
+        /// Allow dispatch for PRs not authored by the configured user.
+        #[arg(long)]
+        allow_non_owned: bool,
+
+        /// Agent command to run inside tmux. The prompt is passed on stdin.
+        #[arg(long, value_name = "COMMAND")]
+        agent_command: Option<String>,
+    },
+
+    /// List actionable GitHub PR feedback for one pull request.
+    Feedback {
+        /// Repo selector: a checkout path, owner/repo, host/owner/repo, or GitHub URL.
+        #[arg(long, value_name = "PATH|OWNER/REPO", default_value = ".")]
+        repo: String,
+
+        /// Pull request number.
+        #[arg(long, value_name = "NUMBER", value_parser = parse_positive_pr_number)]
+        pr: u64,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the viewer login. Defaults to `gh api user --jq .login`.
+        #[arg(long, value_name = "LOGIN")]
+        user: Option<String>,
+
+        /// Treat this login as an automated reviewer. May be repeated.
+        #[arg(long = "robot-login", value_name = "LOGIN")]
+        robot_logins: Vec<String>,
+
+        /// Allow feedback discovery for PRs not authored by the configured user.
+        #[arg(long)]
+        allow_non_owned: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum PrsRunsCommand {
+    /// List local agent run records.
+    List {
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show one local agent run record by id or unique prefix.
+    Show {
+        /// Run id or unique prefix.
+        run_id: String,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Mark one local agent run complete.
+    Complete {
+        /// Run id or unique prefix.
+        run_id: String,
+
+        /// Process exit code from the agent command.
+        #[arg(long, value_name = "CODE")]
+        exit_code: i32,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Update one local agent run's non-terminal lifecycle status.
+    Status {
+        /// Run id or unique prefix.
+        run_id: String,
+
+        /// New non-terminal status.
+        #[arg(long, value_enum)]
+        status: RunStatusArg,
+
+        /// Human-readable status message.
+        #[arg(long, value_name = "TEXT")]
+        message: Option<String>,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Cancel one local agent run and kill its tmux session if still present.
+    Cancel {
+        /// Run id or unique prefix.
+        run_id: String,
+
+        /// Emit JSON instead of a readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Attach to one local agent run's tmux session.
+    Attach {
+        /// Run id or unique prefix.
+        run_id: String,
+    },
+}
+
 /// Diff side accepted by `tuicr review add --side`.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LineSideArg {
@@ -262,20 +662,55 @@ pub enum LineSideArg {
     New,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatusArg {
+    Started,
+    Running,
+    Pushed,
+    Replied,
+    WaitingForUser,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewFilterArg {
+    None,
+    Required,
+    Approved,
+    ChangesRequested,
+}
+
+impl ReviewFilterArg {
+    pub fn as_gh_value(self) -> &'static str {
+        match self {
+            ReviewFilterArg::None => "none",
+            ReviewFilterArg::Required => "required",
+            ReviewFilterArg::Approved => "approved",
+            ReviewFilterArg::ChangesRequested => "changes_requested",
+        }
+    }
+}
+
 impl From<Cli> for CliArgs {
     fn from(cli: Cli) -> Self {
-        let (options, pr_target, review_command) = match cli.command {
+        let (options, pr_target, review_command, prs_command) = match cli.command {
             Some(Subcmd::Tui(command)) => match command.command {
                 Some(TuiSubcmd::Pr(pr)) => (
                     cli.tui_options.merge(command.options).merge(pr.options),
                     Some(pr.target),
                     None,
+                    None,
                 ),
-                None => (cli.tui_options.merge(command.options), None, None),
+                None => (cli.tui_options.merge(command.options), None, None, None),
             },
-            Some(Subcmd::Pr(pr)) => (cli.tui_options.merge(pr.options), Some(pr.target), None),
-            Some(Subcmd::Review { command }) => (TuiOptions::default(), None, Some(command)),
-            None => (cli.tui_options, None, None),
+            Some(Subcmd::Pr(pr)) => (
+                cli.tui_options.merge(pr.options),
+                Some(pr.target),
+                None,
+                None,
+            ),
+            Some(Subcmd::Review { command }) => (TuiOptions::default(), None, Some(command), None),
+            Some(Subcmd::Prs { command }) => (TuiOptions::default(), None, None, Some(command)),
+            None => (cli.tui_options, None, None, None),
         };
         Self {
             theme: options.theme,
@@ -290,6 +725,7 @@ impl From<Cli> for CliArgs {
             pr_target,
             repo_url: options.repo_url,
             review_command,
+            prs_command,
         }
     }
 }
@@ -326,12 +762,14 @@ impl TuiOptions {
 
 impl Cli {
     fn try_into_args(self) -> std::result::Result<CliArgs, clap::Error> {
-        if matches!(self.command, Some(Subcmd::Review { .. }))
-            && self.tui_options.has_any_explicit_value()
+        if matches!(
+            self.command,
+            Some(Subcmd::Review { .. }) | Some(Subcmd::Prs { .. })
+        ) && self.tui_options.has_any_explicit_value()
         {
             return Err(clap::Error::raw(
                 clap::error::ErrorKind::ArgumentConflict,
-                "TUI options cannot be used with `tuicr review`; run `tuicr review <command> --help` for review CLI options",
+                "TUI options cannot be used with non-interactive commands; run the subcommand with --help for command-specific options",
             ));
         }
         Ok(self.into())
@@ -389,6 +827,17 @@ fn non_empty_comment_text(s: &str) -> Result<String, String> {
         Err("comment text cannot be empty".to_string())
     } else {
         Ok(s.to_string())
+    }
+}
+
+fn parse_positive_pr_number(s: &str) -> Result<u64, String> {
+    let number = s
+        .parse::<u64>()
+        .map_err(|_| format!("invalid PR number '{s}'"))?;
+    if number == 0 {
+        Err("PR number must be greater than zero".to_string())
+    } else {
+        Ok(number)
     }
 }
 
@@ -726,6 +1175,422 @@ mod tests {
         let err = parse_for_test(&["tuicr", "--theme", "dark", "review", "list"])
             .expect_err("parse should fail");
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+
+        let err = parse_for_test(&["tuicr", "--theme", "dark", "prs", "feedback", "--pr", "125"])
+            .expect_err("parse should fail");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn should_parse_prs_feedback_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "feedback",
+            "--repo",
+            "squareup/java",
+            "--pr",
+            "480718",
+            "--json",
+            "--user",
+            "tbedor-square2",
+            "--robot-login",
+            "chatgpt-codex-connector[bot]",
+            "--allow-non-owned",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Feedback {
+                repo: "squareup/java".to_string(),
+                pr: 480718,
+                json: true,
+                user: Some("tbedor-square2".to_string()),
+                robot_logins: vec!["chatgpt-codex-connector[bot]".to_string()],
+                allow_non_owned: true,
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_prs_checks_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "checks",
+            "--repo",
+            "squareup/java",
+            "--pr",
+            "480718",
+            "--json",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Checks {
+                repo: "squareup/java".to_string(),
+                pr: 480718,
+                json: true,
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_prs_list_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "list",
+            "--owner",
+            "squareup",
+            "--author",
+            "@me",
+            "--limit",
+            "25",
+            "--repository",
+            "squareup/java",
+            "--draft",
+            "--review",
+            "changes-requested",
+            "--json",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::List {
+                owners: vec!["squareup".to_string()],
+                repositories: vec!["squareup/java".to_string()],
+                author: "@me".to_string(),
+                draft: true,
+                ready: false,
+                review: Some(ReviewFilterArg::ChangesRequested),
+                limit: 25,
+                json: true,
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_prs_dashboard_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "dashboard",
+            "--owner",
+            "squareup",
+            "--repository",
+            "squareup/java",
+            "--author",
+            "@me",
+            "--ready",
+            "--review",
+            "approved",
+            "--needs-action",
+            "--limit",
+            "25",
+            "--json",
+            "--allow-non-owned",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Dashboard {
+                owners: vec!["squareup".to_string()],
+                repositories: vec!["squareup/java".to_string()],
+                author: "@me".to_string(),
+                draft: false,
+                ready: true,
+                review: Some(ReviewFilterArg::Approved),
+                needs_action: true,
+                limit: 25,
+                json: true,
+                tui: false,
+                allow_non_owned: true,
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_prs_dispatch_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "dispatch",
+            "--repo",
+            "squareup/java",
+            "--pr",
+            "480718",
+            "--dry-run",
+            "--json",
+            "--agent-command",
+            "codex exec -",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Dispatch {
+                repo: "squareup/java".to_string(),
+                pr: 480718,
+                dry_run: true,
+                json: true,
+                allow_non_owned: false,
+                agent_command: Some("codex exec -".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_prs_reply_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "reply",
+            "--repo",
+            "squareup/java",
+            "--pr",
+            "480718",
+            "--feedback-id",
+            "PRRC_1",
+            "--body",
+            "Fixed.",
+            "--resolve",
+            "--expected-head-sha",
+            "abc123",
+            "--dry-run",
+            "--json",
+            "--allow-non-owned",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Reply {
+                repo: "squareup/java".to_string(),
+                pr: 480718,
+                feedback_id: Some("PRRC_1".to_string()),
+                thread_id: None,
+                body: Some("Fixed.".to_string()),
+                input: None,
+                resolve: true,
+                expected_head_sha: Some("abc123".to_string()),
+                dry_run: true,
+                json: true,
+                allow_non_owned: true,
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_prs_guard_head_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "guard-head",
+            "--repo",
+            "squareup/java",
+            "--pr",
+            "480718",
+            "--expected-head-sha",
+            "abc123",
+            "--json",
+            "--allow-non-owned",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::GuardHead {
+                repo: "squareup/java".to_string(),
+                pr: 480718,
+                expected_head_sha: "abc123".to_string(),
+                json: true,
+                allow_non_owned: true,
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_prs_resolve_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "resolve",
+            "--repo",
+            "squareup/java",
+            "--pr",
+            "480718",
+            "--thread-id",
+            "PRRT_1",
+            "--expected-head-sha",
+            "abc123",
+            "--dry-run",
+            "--json",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Resolve {
+                repo: "squareup/java".to_string(),
+                pr: 480718,
+                thread_id: "PRRT_1".to_string(),
+                expected_head_sha: Some("abc123".to_string()),
+                dry_run: true,
+                json: true,
+                allow_non_owned: false,
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_prs_watch_command() {
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "watch",
+            "--owner",
+            "squareup",
+            "--repository",
+            "squareup/java",
+            "--author",
+            "@me",
+            "--ready",
+            "--review",
+            "required",
+            "--limit",
+            "25",
+            "--dry-run",
+            "--json",
+            "--once",
+            "--interval-seconds",
+            "60",
+            "--max-iterations",
+            "3",
+            "--max-ci-retries",
+            "4",
+            "--allow-non-owned",
+            "--agent-command",
+            "codex exec -",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Watch {
+                owners: vec!["squareup".to_string()],
+                repositories: vec!["squareup/java".to_string()],
+                author: "@me".to_string(),
+                draft: false,
+                ready: true,
+                review: Some(ReviewFilterArg::Required),
+                limit: 25,
+                dry_run: true,
+                json: true,
+                once: true,
+                interval_seconds: 60,
+                max_iterations: Some(3),
+                max_ci_retries: 4,
+                allow_non_owned: true,
+                agent_command: Some("codex exec -".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn should_parse_prs_runs_commands() {
+        let parsed = parse_for_test(&["tuicr", "prs", "runs", "list", "--json"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Runs {
+                command: PrsRunsCommand::List { json: true },
+            })
+        );
+
+        let parsed = parse_for_test(&["tuicr", "prs", "runs", "show", "abc123", "--json"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Runs {
+                command: PrsRunsCommand::Show {
+                    run_id: "abc123".to_string(),
+                    json: true,
+                },
+            })
+        );
+
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "runs",
+            "complete",
+            "abc123",
+            "--exit-code",
+            "1",
+            "--json",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Runs {
+                command: PrsRunsCommand::Complete {
+                    run_id: "abc123".to_string(),
+                    exit_code: 1,
+                    json: true,
+                },
+            })
+        );
+
+        let parsed = parse_for_test(&[
+            "tuicr",
+            "prs",
+            "runs",
+            "status",
+            "abc123",
+            "--status",
+            "waiting-for-user",
+            "--message",
+            "Needs a human decision",
+            "--json",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Runs {
+                command: PrsRunsCommand::Status {
+                    run_id: "abc123".to_string(),
+                    status: RunStatusArg::WaitingForUser,
+                    message: Some("Needs a human decision".to_string()),
+                    json: true,
+                },
+            })
+        );
+
+        let parsed = parse_for_test(&["tuicr", "prs", "runs", "cancel", "abc123", "--json"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Runs {
+                command: PrsRunsCommand::Cancel {
+                    run_id: "abc123".to_string(),
+                    json: true,
+                },
+            })
+        );
+
+        let parsed = parse_for_test(&["tuicr", "prs", "runs", "attach", "abc123"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed.prs_command,
+            Some(PrsCommand::Runs {
+                command: PrsRunsCommand::Attach {
+                    run_id: "abc123".to_string(),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn should_reject_zero_pr_number_for_prs_feedback() {
+        let err = parse_for_test(&["tuicr", "prs", "feedback", "--pr", "0"])
+            .expect_err("parse should fail");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
     }
 
     #[test]
