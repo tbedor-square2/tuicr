@@ -44,16 +44,36 @@ fn dashboard_opens_pr_and_q_returns_home_before_exit() {
     );
 }
 
+#[test]
+fn dashboard_renders_loading_state_before_pr_fetch_completes() {
+    let sandbox = TestSandbox::with_search_delay("2");
+    let binary = std::env::var("CARGO_BIN_EXE_tuicr").expect("CARGO_BIN_EXE_tuicr should be set");
+    let mut session = PtySession::spawn(&binary, &sandbox);
+
+    session.wait_for("loading", Duration::from_secs(1));
+    session.send("q");
+    session.wait_for_exit(Duration::from_secs(5));
+}
+
 struct TestSandbox {
     _temp: TempDir,
     cwd: PathBuf,
     home: PathBuf,
     bin: PathBuf,
     gh_log: PathBuf,
+    search_delay_seconds: Option<String>,
 }
 
 impl TestSandbox {
     fn new() -> Self {
+        Self::with_search_delay_option(None)
+    }
+
+    fn with_search_delay(seconds: &str) -> Self {
+        Self::with_search_delay_option(Some(seconds.to_string()))
+    }
+
+    fn with_search_delay_option(search_delay_seconds: Option<String>) -> Self {
         let temp = tempfile::tempdir().expect("temp dir");
         let cwd = temp.path().join("cwd");
         let home = temp.path().join("home");
@@ -69,6 +89,7 @@ impl TestSandbox {
             home,
             bin,
             gh_log,
+            search_delay_seconds,
         }
     }
 
@@ -117,6 +138,9 @@ impl PtySession {
                 .to_string_lossy()
                 .to_string(),
         );
+        if let Some(delay) = &sandbox.search_delay_seconds {
+            cmd.env("TUICR_FAKE_GH_SEARCH_DELAY_SECONDS", delay);
+        }
 
         let child = pair.slave.spawn_command(cmd).expect("spawn tuicr");
         drop(pair.slave);
@@ -228,6 +252,9 @@ if [[ "$*" == "api user --jq .login" ]]; then
 fi
 
 if [[ "$1 $2" == "search prs" ]]; then
+  if [[ -n "${{TUICR_FAKE_GH_SEARCH_DELAY_SECONDS:-}}" ]]; then
+    sleep "$TUICR_FAKE_GH_SEARCH_DELAY_SECONDS"
+  fi
   cat <<'JSON'
 [
   {{

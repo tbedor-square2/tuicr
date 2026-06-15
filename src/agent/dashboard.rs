@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::thread;
 
 use crate::agent::ci::{CheckCounts, CheckState, ChecksOptions, collect_checks};
 use crate::agent::dispatch::{DispatchReport, DispatchStatus, list_runs};
@@ -67,7 +68,15 @@ pub struct DashboardRun {
     pub failing_check_count: usize,
 }
 
+const ENRICH_CONCURRENCY: usize = 4;
+
 pub fn dashboard(options: DashboardOptions) -> Result<DashboardReport> {
+    let mut report = dashboard_overview(options.clone())?;
+    enrich_dashboard_report(&mut report, &options);
+    Ok(report)
+}
+
+pub(crate) fn dashboard_overview(options: DashboardOptions) -> Result<DashboardReport> {
     let pr_list = list_prs(PrListOptions {
         owners: options.owners,
         repositories: options.repositories,
@@ -84,52 +93,25 @@ pub fn dashboard(options: DashboardOptions) -> Result<DashboardReport> {
         .into_iter()
         .map(|pr| {
             let latest_run = latest_run_for_pr(&runs, &pr.repository, pr.number);
-            match enrich_pr(
-                &pr.repository,
-                pr.number,
-                options.allow_non_owned,
-                &options.robot_logins,
-                &options.ignored_comment_patterns,
-                options.outdated_thread_mode,
-            ) {
-                Ok(mut row) => {
-                    if options.needs_action
-                        && row.feedback_count.unwrap_or(0) == 0
-                        && row.failing_check_count.unwrap_or(0) == 0
-                    {
-                        return None;
-                    }
-                    row.repository = pr.repository.clone();
-                    row.number = pr.number;
-                    row.title = pr.title.clone();
-                    row.url = pr.url.clone();
-                    row.state = pr.state.clone();
-                    row.is_draft = pr.is_draft;
-                    row.updated_at = pr.updated_at;
-                    row.latest_run = latest_run;
-                    Some(row)
-                }
-                Err(err) => Some(DashboardPr {
-                    repository: pr.repository,
-                    number: pr.number,
-                    title: pr.title,
-                    url: pr.url,
-                    state: pr.state,
-                    is_draft: pr.is_draft,
-                    head_ref_name: String::new(),
-                    base_ref_name: String::new(),
-                    head_sha: String::new(),
-                    updated_at: pr.updated_at,
-                    feedback_count: None,
-                    check_state: None,
-                    check_counts: None,
-                    failing_check_count: None,
-                    latest_run,
-                    error: Some(err.to_string()),
-                }),
+            DashboardPr {
+                repository: pr.repository,
+                number: pr.number,
+                title: pr.title,
+                url: pr.url,
+                state: pr.state,
+                is_draft: pr.is_draft,
+                head_ref_name: String::new(),
+                base_ref_name: String::new(),
+                head_sha: String::new(),
+                updated_at: pr.updated_at,
+                feedback_count: None,
+                check_state: None,
+                check_counts: None,
+                failing_check_count: None,
+                latest_run,
+                error: None,
             }
         })
-        .flatten()
         .collect();
     Ok(DashboardReport {
         author: pr_list.author,
@@ -137,6 +119,106 @@ pub fn dashboard(options: DashboardOptions) -> Result<DashboardReport> {
         generated_at: Utc::now(),
         pull_requests,
     })
+}
+
+pub(crate) fn enrich_dashboard_report(report: &mut DashboardReport, options: &DashboardOptions) {
+    let jobs = report
+        .pull_requests
+        .iter()
+        .enumerate()
+        .map(|(index, pr)| {
+            (
+                index,
+                pr.repository.clone(),
+                pr.number,
+                pr.title.clone(),
+                pr.url.clone(),
+                pr.state.clone(),
+                pr.is_draft,
+                pr.updated_at,
+                pr.latest_run.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for chunk in jobs.chunks(ENRICH_CONCURRENCY) {
+        let handles = chunk
+            .iter()
+            .cloned()
+            .map(
+                |(
+                    index,
+                    repository,
+                    number,
+                    title,
+                    url,
+                    state,
+                    is_draft,
+                    updated_at,
+                    latest_run,
+                )| {
+                    let robot_logins = options.robot_logins.clone();
+                    let ignored_comment_patterns = options.ignored_comment_patterns.clone();
+                    let allow_non_owned = options.allow_non_owned;
+                    let outdated_thread_mode = options.outdated_thread_mode;
+                    thread::spawn(move || {
+                        let result = enrich_pr(
+                            &repository,
+                            number,
+                            allow_non_owned,
+                            &robot_logins,
+                            &ignored_comment_patterns,
+                            outdated_thread_mode,
+                        )
+                        .map(|mut row| {
+                            row.repository = repository.clone();
+                            row.number = number;
+                            row.title = title.clone();
+                            row.url = url.clone();
+                            row.state = state.clone();
+                            row.is_draft = is_draft;
+                            row.updated_at = updated_at;
+                            row.latest_run = latest_run.clone();
+                            row
+                        })
+                        .unwrap_or_else(|err| DashboardPr {
+                            repository,
+                            number,
+                            title,
+                            url,
+                            state,
+                            is_draft,
+                            head_ref_name: String::new(),
+                            base_ref_name: String::new(),
+                            head_sha: String::new(),
+                            updated_at,
+                            feedback_count: None,
+                            check_state: None,
+                            check_counts: None,
+                            failing_check_count: None,
+                            latest_run,
+                            error: Some(err.to_string()),
+                        });
+                        (index, result)
+                    })
+                },
+            )
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            if let Ok((index, row)) = handle.join()
+                && let Some(target) = report.pull_requests.get_mut(index)
+            {
+                *target = row;
+            }
+        }
+    }
+
+    if options.needs_action {
+        report.pull_requests.retain(|row| {
+            row.feedback_count.unwrap_or(0) > 0 || row.failing_check_count.unwrap_or(0) > 0
+        });
+    }
 }
 
 fn enrich_pr(

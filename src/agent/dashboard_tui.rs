@@ -1,5 +1,7 @@
 use std::io;
 use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode};
@@ -14,21 +16,30 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 
-use crate::agent::dashboard::{DashboardOptions, DashboardPr, DashboardReport, dashboard};
+use crate::agent::dashboard::{
+    DashboardOptions, DashboardPr, DashboardReport, dashboard_overview, enrich_dashboard_report,
+};
 use crate::agent::dispatch::{DispatchOptions, attach_run, cancel_run, dispatch};
 use crate::agent::prs_cli::{dispatch_status_label, state_label};
 use crate::error::{Result, TuicrError};
 
 pub fn run(options: DashboardOptions) -> Result<()> {
-    let report = dashboard(options.clone())?;
+    let report = loading_report(&options);
     run_dashboard(options, report)
 }
 
 fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Result<()> {
     let mut terminal = DashboardTerminal::enter()?;
     let mut selected = 0usize;
-    let mut status_message = String::new();
+    let mut status_message = "loading PRs...".to_string();
+    let mut load_rx = Some(spawn_dashboard_load(options.clone()));
     loop {
+        drain_dashboard_load_events(
+            &mut load_rx,
+            &mut report,
+            &mut selected,
+            &mut status_message,
+        );
         if selected >= report.pull_requests.len() {
             selected = report.pull_requests.len().saturating_sub(1);
         }
@@ -56,12 +67,7 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                         match result {
                             Ok(()) => {
                                 status_message = format!("returned from {repository}#{number}");
-                                refresh_dashboard(
-                                    &options,
-                                    &mut report,
-                                    &mut selected,
-                                    &mut status_message,
-                                )?;
+                                load_rx = Some(spawn_dashboard_load(options.clone()));
                             }
                             Err(err) => {
                                 status_message =
@@ -78,7 +84,8 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                     }
                 }
                 KeyCode::Char('r') => {
-                    refresh_dashboard(&options, &mut report, &mut selected, &mut status_message)?;
+                    status_message = "refreshing PR dashboard...".to_string();
+                    load_rx = Some(spawn_dashboard_load(options.clone()));
                 }
                 KeyCode::Char('d') => {
                     if let Some(pr) = report.pull_requests.get(selected) {
@@ -102,12 +109,7 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                             dispatch_report.run_id,
                             dispatch_status_label(dispatch_report.status)
                         );
-                        refresh_dashboard(
-                            &options,
-                            &mut report,
-                            &mut selected,
-                            &mut status_message,
-                        )?;
+                        load_rx = Some(spawn_dashboard_load(options.clone()));
                     }
                 }
                 KeyCode::Char('a') => {
@@ -118,12 +120,7 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                         match result {
                             Ok(()) => {
                                 status_message = format!("returned from agent run {run_id}");
-                                refresh_dashboard(
-                                    &options,
-                                    &mut report,
-                                    &mut selected,
-                                    &mut status_message,
-                                )?;
+                                load_rx = Some(spawn_dashboard_load(options.clone()));
                             }
                             Err(err) => {
                                 status_message = format!("attach failed for run {run_id}: {err}");
@@ -141,12 +138,7 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                             cancelled.run_id,
                             dispatch_status_label(cancelled.status)
                         );
-                        refresh_dashboard(
-                            &options,
-                            &mut report,
-                            &mut selected,
-                            &mut status_message,
-                        )?;
+                        load_rx = Some(spawn_dashboard_load(options.clone()));
                     } else {
                         status_message = "selected PR has no local agent run to cancel".to_string();
                     }
@@ -158,20 +150,86 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
     terminal.leave()
 }
 
-fn refresh_dashboard(
-    options: &DashboardOptions,
+enum DashboardLoadEvent {
+    Listed(DashboardReport),
+    Enriched(DashboardReport),
+    Failed(String),
+}
+
+fn spawn_dashboard_load(options: DashboardOptions) -> mpsc::Receiver<DashboardLoadEvent> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || match dashboard_overview(options.clone()) {
+        Ok(mut report) => {
+            if !options.needs_action {
+                let _ = tx.send(DashboardLoadEvent::Listed(report.clone()));
+            }
+            enrich_dashboard_report(&mut report, &options);
+            let _ = tx.send(DashboardLoadEvent::Enriched(report));
+        }
+        Err(err) => {
+            let _ = tx.send(DashboardLoadEvent::Failed(err.to_string()));
+        }
+    });
+    rx
+}
+
+fn drain_dashboard_load_events(
+    load_rx: &mut Option<mpsc::Receiver<DashboardLoadEvent>>,
     report: &mut DashboardReport,
     selected: &mut usize,
     status_message: &mut String,
-) -> Result<()> {
-    *report = dashboard(options.clone())?;
+) {
+    let Some(rx) = load_rx.take() else {
+        return;
+    };
+    let mut keep_rx = true;
+    loop {
+        match rx.try_recv() {
+            Ok(DashboardLoadEvent::Listed(next)) => {
+                *report = next;
+                clamp_selected(report, selected);
+                *status_message = "loaded PR list; fetching feedback and checks...".to_string();
+            }
+            Ok(DashboardLoadEvent::Enriched(next)) => {
+                *report = next;
+                clamp_selected(report, selected);
+                *status_message =
+                    format!("dashboard updated for {} PRs", report.pull_requests.len());
+                keep_rx = false;
+            }
+            Ok(DashboardLoadEvent::Failed(err)) => {
+                *status_message = format!("dashboard refresh failed: {err}");
+                keep_rx = false;
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                keep_rx = false;
+                break;
+            }
+        }
+    }
+    if keep_rx {
+        *load_rx = Some(rx);
+    }
+}
+
+fn clamp_selected(report: &DashboardReport, selected: &mut usize) {
     if *selected >= report.pull_requests.len() {
         *selected = report.pull_requests.len().saturating_sub(1);
     }
-    if status_message.is_empty() {
-        *status_message = "dashboard refreshed".to_string();
+}
+
+fn loading_report(options: &DashboardOptions) -> DashboardReport {
+    DashboardReport {
+        author: options.author.clone().unwrap_or_else(|| "@me".to_string()),
+        owners: if options.owners.is_empty() {
+            vec!["squareup".to_string()]
+        } else {
+            options.owners.clone()
+        },
+        generated_at: chrono::Utc::now(),
+        pull_requests: Vec::new(),
     }
-    Ok(())
 }
 
 fn selected_latest_run_id(report: &DashboardReport, selected: usize) -> Option<String> {
