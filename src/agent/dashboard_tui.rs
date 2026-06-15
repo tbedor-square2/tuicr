@@ -67,6 +67,7 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                         match result {
                             Ok(()) => {
                                 status_message = format!("returned from {repository}#{number}");
+                                clear_enrichment(&mut report);
                                 load_rx = Some(spawn_dashboard_load(options.clone()));
                             }
                             Err(err) => {
@@ -84,6 +85,7 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                     }
                 }
                 KeyCode::Char('r') => {
+                    clear_enrichment(&mut report);
                     status_message = "refreshing PR dashboard...".to_string();
                     load_rx = Some(spawn_dashboard_load(options.clone()));
                 }
@@ -109,6 +111,7 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                             dispatch_report.run_id,
                             dispatch_status_label(dispatch_report.status)
                         );
+                        clear_enrichment(&mut report);
                         load_rx = Some(spawn_dashboard_load(options.clone()));
                     }
                 }
@@ -120,6 +123,7 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                         match result {
                             Ok(()) => {
                                 status_message = format!("returned from agent run {run_id}");
+                                clear_enrichment(&mut report);
                                 load_rx = Some(spawn_dashboard_load(options.clone()));
                             }
                             Err(err) => {
@@ -138,6 +142,7 @@ fn run_dashboard(options: DashboardOptions, mut report: DashboardReport) -> Resu
                             cancelled.run_id,
                             dispatch_status_label(cancelled.status)
                         );
+                        clear_enrichment(&mut report);
                         load_rx = Some(spawn_dashboard_load(options.clone()));
                     } else {
                         status_message = "selected PR has no local agent run to cancel".to_string();
@@ -216,6 +221,17 @@ fn drain_dashboard_load_events(
 fn clamp_selected(report: &DashboardReport, selected: &mut usize) {
     if *selected >= report.pull_requests.len() {
         *selected = report.pull_requests.len().saturating_sub(1);
+    }
+}
+
+fn clear_enrichment(report: &mut DashboardReport) {
+    report.generated_at = chrono::Utc::now();
+    for pr in &mut report.pull_requests {
+        pr.feedback_count = None;
+        pr.check_state = None;
+        pr.check_counts = None;
+        pr.failing_check_count = None;
+        pr.error = None;
     }
 }
 
@@ -650,5 +666,49 @@ mod tests {
             Some("run-123")
         );
         assert_eq!(selected_latest_run_id(&report, 1), None);
+    }
+
+    #[test]
+    fn should_clear_enrichment_before_refresh() {
+        let mut report = DashboardReport {
+            author: "alice".to_string(),
+            owners: vec!["squareup".to_string()],
+            generated_at: chrono::Utc::now(),
+            pull_requests: vec![DashboardPr {
+                repository: "squareup/java".to_string(),
+                number: 481332,
+                title: "Add traffic checks".to_string(),
+                url: "https://github.com/squareup/java/pull/481332".to_string(),
+                state: "open".to_string(),
+                is_draft: true,
+                head_ref_name: "feature".to_string(),
+                base_ref_name: "main".to_string(),
+                head_sha: "abcdef1234567890".to_string(),
+                updated_at: None,
+                feedback_count: Some(2),
+                check_state: Some(CheckState::Failing),
+                check_counts: Some(crate::agent::ci::CheckCounts {
+                    pending: 0,
+                    passing: 10,
+                    failing: 1,
+                    cancelled: 0,
+                    skipped: 0,
+                    unknown: 0,
+                }),
+                failing_check_count: Some(1),
+                latest_run: None,
+                error: Some("old error".to_string()),
+            }],
+        };
+
+        clear_enrichment(&mut report);
+
+        let row = &report.pull_requests[0];
+        assert_eq!(row.feedback_count, None);
+        assert_eq!(row.check_state, None);
+        assert_eq!(row.check_counts, None);
+        assert_eq!(row.failing_check_count, None);
+        assert_eq!(row.error, None);
+        assert_eq!(row.head_sha, "abcdef1234567890");
     }
 }
